@@ -136,10 +136,10 @@ impl Ui {
 
     fn key_game(&mut self, key: KeyEvent, node: &mut Node, now: Instant) {
         let steer = match key.code {
-            KeyCode::Up | KeyCode::Char('w' | 'W' | 'ц' | 'Ц') => Some(Dir::Up),
-            KeyCode::Down | KeyCode::Char('s' | 'S' | 'ы' | 'Ы') => Some(Dir::Down),
-            KeyCode::Left | KeyCode::Char('a' | 'A' | 'ф' | 'Ф') => Some(Dir::Left),
-            KeyCode::Right | KeyCode::Char('d' | 'D' | 'в' | 'В') => Some(Dir::Right),
+            KeyCode::Up | KeyCode::Char('w' | 'W' | 'ц' | 'Ц' | 'k' | 'K') => Some(Dir::Up),
+            KeyCode::Down | KeyCode::Char('s' | 'S' | 'ы' | 'Ы' | 'j' | 'J') => Some(Dir::Down),
+            KeyCode::Left | KeyCode::Char('a' | 'A' | 'ф' | 'Ф' | 'h' | 'H') => Some(Dir::Left),
+            KeyCode::Right | KeyCode::Char('d' | 'D' | 'в' | 'В' | 'l' | 'L') => Some(Dir::Right),
             _ => None,
         };
         if let Some(d) = steer {
@@ -163,8 +163,8 @@ impl Ui {
                     self.selected += 1;
                 }
             }
-            KeyCode::Enter | KeyCode::Char('p' | 'P' | 'з' | 'З') => self.join(node, now, PlayerStatus::Playing),
-            KeyCode::Char('v' | 'V' | 'м' | 'М') => self.join(node, now, PlayerStatus::Viewing),
+            KeyCode::Enter | KeyCode::Char('p' | 'P' | 'з' | 'З' | 'l' | 'L') => self.join(node, now, PlayerStatus::Playing),
+            KeyCode::Char('v' | 'V' | 'м' | 'М' | 'h' | 'H') => self.join(node, now, PlayerStatus::Viewing),
             KeyCode::Char('c' | 'C' | 'с' | 'С') => {
                 self.form.error = None;
                 self.screen = Screen::Create;
@@ -228,8 +228,10 @@ impl Ui {
         let f = &mut self.form;
         match key.code {
             KeyCode::Esc => self.screen = Screen::Lobby,
-            KeyCode::Tab | KeyCode::Down => f.field = (f.field + 1) % FIELDS,
-            KeyCode::BackTab | KeyCode::Up => f.field = (f.field + FIELDS - 1) % FIELDS,
+            KeyCode::Tab | KeyCode::Down | KeyCode::Char('j' | 'J')
+                => f.field = (f.field + 1) % FIELDS,
+            KeyCode::BackTab | KeyCode::Up | KeyCode::Char('k' | 'K')
+                => f.field = (f.field + FIELDS - 1) % FIELDS,
             KeyCode::Enter => self.submit_form(node, now),
             KeyCode::Backspace => {
                 match f.field {
@@ -241,7 +243,8 @@ impl Ui {
                     _ => None,
                 };
             }
-            KeyCode::Left | KeyCode::Right if f.field == 5 => f.on_server = !f.on_server,
+            KeyCode::Left | KeyCode::Char('h' | 'H') | KeyCode::Right | KeyCode::Char('l' | 'L')
+                if f.field == 5 => f.on_server = !f.on_server,
             KeyCode::Char(' ') if f.field == 5 => f.on_server = !f.on_server,
             KeyCode::Char(c) => match f.field {
                 0 if !c.is_control() && f.game.len() + c.len_utf8() <= 32 => f.game.push(c),
