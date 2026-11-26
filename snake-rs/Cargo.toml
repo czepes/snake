@@ -1,0 +1,18 @@
+[package]
+name = "snake-rs"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "snake"
+path = "src/lib.rs"
+
+[[bin]]
+name = "snake"
+path = "src/main.rs"
+
+[dependencies]
+crossterm = "0.29"
+ratatui = "0.30"
+socket2 = { version = "0.6", features = ["all"] }
+if-addrs = "0.15"
