@@ -288,12 +288,77 @@ impl Ui {
         self.screen = Screen::Lobby;
     }
 
+    fn min_size(&self, node: &Node) -> (u16, u16, &'static str) {
+        match node.phase() {
+            PhaseKind::InGame => (100, 20, "игрового экрана"),
+            PhaseKind::Joining => (64, 10, "экрана подключения"),
+            PhaseKind::Lobby => match self.screen {
+                Screen::Create => (64, 16, "формы создания игры"),
+                Screen::EditName => (44, 6, "ввода имени"),
+                Screen::Lobby => (80, 18, "лобби"),
+            },
+        }
+    }
+
     // ───────────────────────────── Отрисовка ─────────────────────────────────
+
+    fn draw_too_small(&self, f: &mut Frame, node: &Node) -> bool {
+        let (min_w, min_h, label) = self.min_size(node);
+        let area = f.area();
+
+        if area.width >= min_w && area.height >= min_h {
+            return false;
+        }
+        //
+        // Если даже под сообщение нет места — молча выходим, чтобы не паниковать.
+        if area.width < 20 || area.height < 3 {
+            return true;
+        }
+
+        let text = vec![
+            Line::from(Span::styled(
+                "Терминал слишком мал",
+                Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(format!("Сейчас:  {} × {}", area.width, area.height)),
+            Line::from(format!("Нужно:   {min_w} × {min_h}")),
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("для {label}"),
+                Style::new().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "Увеличьте окно терминала",
+                Style::new().fg(Color::DarkGray),
+            )),
+        ];
+
+        // Блок по центру: ширина = max(длина строк, 24), высота = число строк + 2 (рамка).
+        let w = (text.iter().map(|l| l.width()).max().unwrap_or(0) as u16 + 4).max(28).min(area.width);
+        let h = (text.len() as u16 + 2).min(area.height);
+        let rect = centered(area, w, h);
+
+        f.render_widget(Clear, rect);
+        f.render_widget(
+            Paragraph::new(text)
+                .alignment(Alignment::Center)
+                .block(Block::bordered()),
+            rect,
+        );
+
+        true
+    }
 
     pub fn draw(&mut self, f: &mut Frame, node: &Node, now: Instant, lan_ok: bool) {
         if self.msg.as_ref().is_some_and(|m| m.until <= now) {
             self.msg = None;
         }
+
+        if self.draw_too_small(f, node) {
+            return;
+        }
+
         match node.phase() {
             PhaseKind::InGame => {
                 if let Some(v) = node.game_view() {
@@ -531,18 +596,20 @@ impl Ui {
         }
         f.render_widget(Paragraph::new(Line::from(head)), rows[0]);
 
+        // Сайдбар фиксированной ширины прижат к правому краю; поле центрируется
+        // в оставшейся левой колонке.
         const SIDE_W: u16 = 40;
-        let (cw, vw, vh) = board_dims(&v.cfg, rows[1].width.saturating_sub(SIDE_W) as usize, rows[1].height as usize);
+        let board_col = rows[1].width.saturating_sub(SIDE_W);
+        let (cw, vw, vh) = board_dims(&v.cfg, board_col as usize, rows[1].height as usize);
         let board_w = ((vw * cw + 2) as u16).max(24);
+
         let body = Layout::new(
             Direction::Horizontal,
-            [Constraint::Length(board_w), Constraint::Length(SIDE_W), Constraint::Min(0)],
+            [Constraint::Min(0), Constraint::Length(SIDE_W)],
         )
         .split(rows[1]);
-        let board_area = Rect {
-            height: ((vh + 2) as u16).min(body[0].height),
-            ..body[0]
-        };
+
+        let board_area = centered(body[0], board_w, (vh + 2) as u16);
         self.draw_board(f, v, board_area);
         self.draw_side(f, v, body[1]);
 
