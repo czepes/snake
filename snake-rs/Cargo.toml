@@ -16,3 +16,8 @@ crossterm = "0.29"
 ratatui = "0.30"
 socket2 = { version = "0.6", features = ["all"] }
 if-addrs = "0.15"
+bytes = "1"
+prost = "0.14.6"
+
+[build-dependencies]
+prost-build = "0.14.6"
