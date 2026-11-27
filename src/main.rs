@@ -10,14 +10,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ratatui::crossterm::event::{self, Event as TermEvent, KeyEventKind};
 
-use snake::net::{DEFAULT_SERVER, Net, spawn_resolver};
-use snake::node::Node;
-use snake::ui::Ui;
+use snakes::net::{DEFAULT_SERVER, Net, spawn_resolver};
+use snakes::node::Node;
+use snakes::ui::Ui;
 
 const HELP: &str = "\
 Змейка по сети (протокол v2)
 
-Использование: snake [параметры]
+Использование: snakes [параметры]
 
   --name ИМЯ          имя игрока (по умолчанию из $SNAKE_NAME или $USER)
   --server АДРЕС      сервер курса host:port (по умолчанию snakes.ippolitov.me:9193)

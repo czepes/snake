@@ -1,14 +1,14 @@
 [package]
-name = "snake-rs"
+name = "snakes"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "snake"
+name = "snakes"
 path = "src/lib.rs"
 
 [[bin]]
-name = "snake"
+name = "snakes"
 path = "src/main.rs"
 
 [dependencies]

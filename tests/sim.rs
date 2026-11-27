@@ -5,11 +5,11 @@ use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::time::{Duration, Instant};
 
-use snake::catalog::GameKey;
-use snake::node::{Command, Event, GameView, Node, PhaseKind};
-use snake::reliable::Out;
-use snake::rules::{Rng, Snake};
-use snake::wire::*;
+use snakes::catalog::GameKey;
+use snakes::node::{Command, Event, GameView, Node, PhaseKind};
+use snakes::reliable::Out;
+use snakes::rules::{Rng, Snake};
+use snakes::wire::*;
 
 fn addr_of(i: usize) -> SocketAddrV4 {
     SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, (i + 1) as u8), 4000 + i as u16)
