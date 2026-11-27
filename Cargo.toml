@@ -1,5 +1,5 @@
 [package]
-name = "snake-rs"
+name = "snake-online"
 version = "0.1.0"
 edition = "2024"
 
@@ -8,7 +8,7 @@ name = "snake"
 path = "src/lib.rs"
 
 [[bin]]
-name = "snake"
+name = "snake-online"
 path = "src/main.rs"
 
 [dependencies]

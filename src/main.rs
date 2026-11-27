@@ -17,7 +17,7 @@ use snake::ui::Ui;
 const HELP: &str = "\
 Змейка по сети (протокол v2)
 
-Использование: snake [параметры]
+Использование: snake-online [параметры]
 
   --name ИМЯ          имя игрока (по умолчанию из $SNAKE_NAME или $USER)
   --server АДРЕС      сервер курса host:port (по умолчанию snakes.ippolitov.me:9193)
