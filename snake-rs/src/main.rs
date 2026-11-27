@@ -23,6 +23,7 @@ const HELP: &str = "\
   --server АДРЕС      сервер курса host:port (по умолчанию snakes.ippolitov.me:9193)
   --no-server         не обращаться к серверу курса
   --no-multicast      не использовать multicast (только сервер и прямые адреса)
+  --no-animations     отключить все анимации интерфейса
   --port ПОРТ         фиксированный UDP-порт игрового сокета (по умолчанию выбирает ОС)
   --log ФАЙЛ          писать журнал протокола в файл (или переменная $SNAKE_LOG)
   -h, --help          эта справка
@@ -31,22 +32,28 @@ const HELP: &str = "\
 struct Args {
     server: Option<String>,
     multicast: bool,
+    animations: bool,
     port: Option<u16>,
     name: String,
     log: Option<String>,
 }
 
 fn parse_args() -> Result<Option<Args>, String> {
+    parse_args_from(std::env::args().skip(1))
+}
+
+fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Option<Args>, String> {
     let mut a = Args {
         server: Some(DEFAULT_SERVER.to_owned()),
         multicast: true,
+        animations: true,
         port: None,
         name: std::env::var("SNAKE_NAME")
             .or_else(|_| std::env::var("USER"))
             .unwrap_or_default(),
         log: std::env::var("SNAKE_LOG").ok(),
     };
-    let mut it = std::env::args().skip(1);
+    let mut it = args.into_iter();
     while let Some(arg) = it.next() {
         let mut value = |what: &str| {
             it.next()
@@ -56,6 +63,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "-h" | "--help" => return Ok(None),
             "--no-server" => a.server = None,
             "--no-multicast" => a.multicast = false,
+            "--no-animations" => a.animations = false,
             "--server" => a.server = Some(value("host:port")?),
             "--name" => a.name = value("имя")?,
             "--log" => a.log = Some(value("файл")?),
@@ -118,7 +126,7 @@ fn main() -> ExitCode {
     node.set_trace(log.is_some());
 
     let resolver = args.server.clone().map(spawn_resolver);
-    let mut ui = Ui::new(args.name.trim().to_owned());
+    let mut ui = Ui::with_animations(args.name.trim().to_owned(), args.animations);
 
     let mut terminal = ratatui::init();
     let mut last_draw = start - Duration::from_secs(1);
@@ -202,4 +210,38 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn animations_are_enabled_by_default() {
+        assert!(parse_args_from(Vec::new()).unwrap().unwrap().animations);
+    }
+
+    #[test]
+    fn no_animations_can_be_combined_with_other_options() {
+        let args = [
+            "--no-animations",
+            "--name",
+            "Игрок",
+            "--no-server",
+            "--no-multicast",
+        ];
+        let args = parse_args_from(args.map(str::to_owned)).unwrap().unwrap();
+        assert!(!args.animations && !args.multicast && args.server.is_none());
+        assert_eq!(args.name, "Игрок");
+    }
+
+    #[test]
+    fn help_accepts_no_animations_without_starting_the_game() {
+        assert!(
+            parse_args_from(["--no-animations", "--help"].map(str::to_owned))
+                .unwrap()
+                .is_none()
+        );
+        assert!(HELP.contains("--no-animations"));
+    }
 }

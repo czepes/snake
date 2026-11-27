@@ -13,6 +13,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Cell as TCell, Clear, Paragraph, Row, Table, Wrap};
 
+mod animations;
+
+use animations::{Animations, BoardViewport};
+
 use crate::node::{Command, Event, GameView, Node, PhaseKind};
 use crate::wire::{
     Config, Dir, MAX_SNAKES, NodeRole, PlayerStatus, valid_game_name, valid_player_name,
@@ -75,10 +79,15 @@ pub struct Ui {
     form: CreateForm,
     name_buf: String,
     msg: Option<Msg>,
+    animations: Animations,
 }
 
 impl Ui {
     pub fn new(player_name: String) -> Ui {
+        Self::with_animations(player_name, true)
+    }
+
+    pub fn with_animations(player_name: String, enabled: bool) -> Ui {
         let form = CreateForm::new("Игра");
         Ui {
             player_name,
@@ -88,6 +97,7 @@ impl Ui {
             form,
             name_buf: String::new(),
             msg: None,
+            animations: Animations::new(enabled),
         }
     }
 
@@ -408,14 +418,17 @@ impl Ui {
             self.msg = None;
         }
 
+        let view = node.game_view();
+        self.animations.update(node.phase(), view.as_ref(), now);
+
         if self.draw_too_small(f, node) {
             return;
         }
 
         match node.phase() {
             PhaseKind::InGame => {
-                if let Some(v) = node.game_view() {
-                    self.draw_game(f, &v);
+                if let Some(v) = view {
+                    self.draw_game(f, &v, now);
                 }
             }
             PhaseKind::Joining => self.draw_joining(f, node, now),
@@ -429,6 +442,7 @@ impl Ui {
                 }
             }
         }
+        self.animations.render_transition(f, now);
     }
 
     fn message_line(&self) -> Paragraph<'static> {
@@ -683,7 +697,7 @@ impl Ui {
         );
     }
 
-    fn draw_game(&self, f: &mut Frame, v: &GameView) {
+    fn draw_game(&mut self, f: &mut Frame, v: &GameView, now: Instant) {
         let rows = Layout::vertical([
             Constraint::Length(2),
             Constraint::Min(6),
@@ -725,7 +739,7 @@ impl Ui {
         .split(rows[1]);
 
         let board_area = centered(body[0], board_w, (vh + 2) as u16);
-        self.draw_board(f, v, board_area);
+        self.draw_board(f, v, board_area, now);
         self.draw_side(f, v, body[1]);
 
         let state_line = match v.status {
@@ -755,7 +769,7 @@ impl Ui {
         f.render_widget(self.message_line(), foot[1]);
     }
 
-    fn draw_board(&self, f: &mut Frame, v: &GameView, area: Rect) {
+    fn draw_board(&mut self, f: &mut Frame, v: &GameView, area: Rect, now: Instant) {
         let (w, h) = (v.cfg.width as usize, v.cfg.height as usize);
         let (cw, vw, vh) = board_dims(&v.cfg, area.width as usize, area.height as usize);
 
@@ -767,19 +781,15 @@ impl Ui {
         let ox = ((focus.0 as usize).saturating_sub(vw / 2)).min(w - vw);
         let oy = ((focus.1 as usize).saturating_sub(vh / 2)).min(h - vh);
 
-        let mut order: Vec<i32> = v.players.iter().map(|p| p.id).collect();
-        order.sort_unstable();
-        let color_of =
-            |id: i32| PALETTE[order.iter().position(|&x| x == id).unwrap_or(0) % PALETTE.len()];
-
         let mut occ: HashMap<(i32, i32), (Color, bool)> = HashMap::new();
         for s in &v.world.snakes {
-            let color = color_of(s.owner);
+            let color = player_color(v, s.owner);
             for (i, &c) in s.cells.iter().enumerate() {
                 occ.insert(c, (color, i == 0));
             }
         }
-        let foods: std::collections::HashSet<(i32, i32)> = v.world.foods.iter().copied().collect();
+
+        let foods: std::collections::HashSet<_> = v.world.foods.iter().copied().collect();
 
         let mut lines: Vec<Line> = Vec::with_capacity(vh);
         for y in oy..oy + vh {
@@ -822,6 +832,9 @@ impl Ui {
             Paragraph::new(lines).block(Block::bordered().title(title)),
             area,
         );
+
+        self.animations
+            .render_board(f, v, BoardViewport::new(area, (ox, oy), (vw, vh), cw), now);
     }
 
     fn draw_side(&self, f: &mut Frame, v: &GameView, area: Rect) {
@@ -833,16 +846,13 @@ impl Ui {
         ])
         .split(area);
 
-        let mut order: Vec<i32> = v.players.iter().map(|p| p.id).collect();
-        order.sort_unstable();
         let mut players: Vec<_> = v.players.iter().collect();
         players.sort_by(|a, b| b.score.cmp(&a.score).then(a.id.cmp(&b.id)));
         let rows: Vec<Row> = players
             .iter()
             .map(|p| {
                 let has_snake = v.world.snake(p.id).is_some();
-                let color =
-                    PALETTE[order.iter().position(|&x| x == p.id).unwrap_or(0) % PALETTE.len()];
+                let color = player_color(v, p.id);
                 let swatch = Span::styled(
                     "■ ",
                     Style::new().fg(if has_snake { color } else { Color::DarkGray }),
@@ -903,6 +913,11 @@ impl Ui {
             parts[1],
         );
     }
+}
+
+fn player_color(v: &GameView, id: i32) -> Color {
+    let index = v.players.iter().filter(|p| p.id < id).count();
+    PALETTE[index % PALETTE.len()]
 }
 
 /// Размеры видимой части поля: ширина клетки (1 или 2 столбца), клеток по ширине и высоте.
