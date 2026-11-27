@@ -92,7 +92,12 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { width: 40, height: 30, food_static: 1, state_delay_ms: 1000 }
+        Config {
+            width: 40,
+            height: 30,
+            food_static: 1,
+            state_delay_ms: 1000,
+        }
     }
 }
 
@@ -136,9 +141,21 @@ pub enum Body {
     Ack,
     State(StateMsg),
     Announcement(Vec<Announcement>),
-    Join { ptype: PlayerType, player_name: String, game_name: String, status: PlayerStatus },
-    Error { text: String, request_seq: i64 },
-    RoleChange { sender: Option<NodeRole>, receiver: Option<NodeRole>, order: i32 },
+    Join {
+        ptype: PlayerType,
+        player_name: String,
+        game_name: String,
+        status: PlayerStatus,
+    },
+    Error {
+        text: String,
+        request_seq: i64,
+    },
+    RoleChange {
+        sender: Option<NodeRole>,
+        receiver: Option<NodeRole>,
+        order: i32,
+    },
     Discover,
     StatusChange(PlayerStatus),
     Leave,
@@ -192,13 +209,22 @@ impl Message {
 
         let ty = match &self.body {
             Body::Ping => gm::Type::Ping(gm::PingMsg {}),
-            Body::Steer(d) => gm::Type::Steer(gm::SteerMsg { direction: dir_to_proto(*d) as i32 }),
+            Body::Steer(d) => gm::Type::Steer(gm::SteerMsg {
+                direction: dir_to_proto(*d) as i32,
+            }),
             Body::Ack => gm::Type::Ack(gm::AckMsg {}),
-            Body::State(s) => gm::Type::State(gm::StateMsg { state: state_to_proto(s) }),
+            Body::State(s) => gm::Type::State(gm::StateMsg {
+                state: state_to_proto(s),
+            }),
             Body::Announcement(games) => gm::Type::Announcement(gm::AnnouncementMsg {
                 games: games.iter().map(announcement_to_proto).collect(),
             }),
-            Body::Join { ptype, player_name, game_name, status } => gm::Type::Join(gm::JoinMsg {
+            Body::Join {
+                ptype,
+                player_name,
+                game_name,
+                status,
+            } => gm::Type::Join(gm::JoinMsg {
                 player_type: Some(ptype_to_proto(*ptype) as i32),
                 player_name: player_name.clone(),
                 game_name: game_name.clone(),
@@ -208,7 +234,11 @@ impl Message {
                 error_message: text.clone(),
                 request_seq: *request_seq,
             }),
-            Body::RoleChange { sender, receiver, order } => gm::Type::NodeRoleChange(gm::NodeRoleChangeMsg {
+            Body::RoleChange {
+                sender,
+                receiver,
+                order,
+            } => gm::Type::NodeRoleChange(gm::NodeRoleChangeMsg {
                 sender_role: sender.map(|r| role_to_proto(r) as i32),
                 receiver_role: receiver.map(|r| role_to_proto(r) as i32),
                 state_order: *order,
@@ -238,22 +268,34 @@ impl Message {
             Some(gm::Type::Ack(_)) => Body::Ack,
             Some(gm::Type::State(s)) => Body::State(state_from_proto(s.state)?),
             Some(gm::Type::Announcement(a)) => Body::Announcement(
-                a.games.into_iter().map(announcement_from_proto).collect::<Result<_, _>>()?,
+                a.games
+                    .into_iter()
+                    .map(announcement_from_proto)
+                    .collect::<Result<_, _>>()?,
             ),
             Some(gm::Type::Join(j)) => Body::Join {
-                ptype: j.player_type.map(ptype_from_proto).transpose()?.unwrap_or(PlayerType::Human),
+                ptype: j
+                    .player_type
+                    .map(ptype_from_proto)
+                    .transpose()?
+                    .unwrap_or(PlayerType::Human),
                 player_name: j.player_name,
                 game_name: j.game_name,
                 status: status_from_proto(j.requested_status)?,
             },
-            Some(gm::Type::Error(e)) => Body::Error { text: e.error_message, request_seq: e.request_seq },
+            Some(gm::Type::Error(e)) => Body::Error {
+                text: e.error_message,
+                request_seq: e.request_seq,
+            },
             Some(gm::Type::NodeRoleChange(r)) => Body::RoleChange {
                 sender: r.sender_role.map(role_from_proto).transpose()?,
                 receiver: r.receiver_role.map(role_from_proto).transpose()?,
                 order: r.state_order,
             },
             Some(gm::Type::Discover(_)) => Body::Discover,
-            Some(gm::Type::PlayerStatusChange(s)) => Body::StatusChange(status_from_proto(s.status)?),
+            Some(gm::Type::PlayerStatusChange(s)) => {
+                Body::StatusChange(status_from_proto(s.status)?)
+            }
             Some(gm::Type::Leave(_)) => Body::Leave,
             None => return Err(DecodeError("missing message type")),
         };
@@ -270,7 +312,8 @@ impl Message {
 pub fn encode(m: &Message) -> Result<Vec<u8>, EncodeError> {
     let p = m.to_proto();
     let mut buf = Vec::with_capacity(128);
-    p.encode(&mut buf).map_err(|_| EncodeError::Prost("encode"))?;
+    p.encode(&mut buf)
+        .map_err(|_| EncodeError::Prost("encode"))?;
     if buf.len() > MAX_DATAGRAM {
         return Err(EncodeError::TooLarge(buf.len()));
     }
@@ -391,7 +434,11 @@ fn player_from_proto(p: proto::GamePlayer) -> Result<PlayerInfo, DecodeError> {
         id: p.id,
         addr,
         role: role_from_proto(p.role)?,
-        ptype: p.r#type.map(ptype_from_proto).transpose()?.unwrap_or(PlayerType::Human),
+        ptype: p
+            .r#type
+            .map(ptype_from_proto)
+            .transpose()?
+            .unwrap_or(PlayerType::Human),
         score: p.score,
         status: status_from_proto(p.status)?,
     })
@@ -444,7 +491,9 @@ fn snake_from_proto(s: proto::game_state::Snake) -> Result<WireSnake, DecodeErro
 }
 
 fn players_to_proto(players: &[PlayerInfo]) -> proto::GamePlayers {
-    proto::GamePlayers { players: players.iter().map(player_to_proto).collect() }
+    proto::GamePlayers {
+        players: players.iter().map(player_to_proto).collect(),
+    }
 }
 
 fn players_from_proto(p: proto::GamePlayers) -> Result<Vec<PlayerInfo>, DecodeError> {
@@ -473,7 +522,11 @@ fn state_from_proto(s: proto::GameState) -> Result<StateMsg, DecodeError> {
     }
     Ok(StateMsg {
         order: s.state_order,
-        snakes: s.snakes.into_iter().map(snake_from_proto).collect::<Result<_, _>>()?,
+        snakes: s
+            .snakes
+            .into_iter()
+            .map(snake_from_proto)
+            .collect::<Result<_, _>>()?,
         foods: s.foods.into_iter().map(coord_from_proto).collect(),
         players: players_from_proto(s.players)?,
         next_player_id: s.next_player_id,

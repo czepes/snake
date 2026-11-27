@@ -39,13 +39,19 @@ impl Net {
     /// `port` — порт игрового сокета (`None` — выбирает ОС), `multicast` — принимать ли multicast.
     pub fn open(port: Option<u16>, multicast: bool, now: Instant) -> io::Result<Net> {
         let unicast = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-        unicast.bind(&SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port.unwrap_or(0))).into())?;
+        unicast.bind(
+            &SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port.unwrap_or(0))).into(),
+        )?;
         unicast.set_nonblocking(true)?;
         unicast.set_multicast_loop_v4(true)?;
         unicast.set_multicast_ttl_v4(1)?;
         let unicast: UdpSocket = unicast.into();
 
-        let mcast = if multicast { open_multicast().ok() } else { None };
+        let mcast = if multicast {
+            open_multicast().ok()
+        } else {
+            None
+        };
         let mut net = Net {
             unicast,
             mcast,
@@ -139,7 +145,12 @@ fn open_multicast() -> io::Result<UdpSocket> {
     // На BSD и macOS совместное использование порта требует SO_REUSEPORT. На Linux его
     // включать нельзя: ядро разделит датаграммы между сокетами, и каждый экземпляр
     // получит лишь часть анонсов. Там хватает SO_REUSEADDR.
-    #[cfg(all(unix, not(target_os = "linux"), not(target_os = "solaris"), not(target_os = "illumos")))]
+    #[cfg(all(
+        unix,
+        not(target_os = "linux"),
+        not(target_os = "solaris"),
+        not(target_os = "illumos")
+    ))]
     s.set_reuse_port(true)?;
     #[cfg(target_os = "linux")]
     let _ = s.set_multicast_all_v4(false);

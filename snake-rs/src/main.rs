@@ -41,12 +41,17 @@ fn parse_args() -> Result<Option<Args>, String> {
         server: Some(DEFAULT_SERVER.to_owned()),
         multicast: true,
         port: None,
-        name: std::env::var("SNAKE_NAME").or_else(|_| std::env::var("USER")).unwrap_or_default(),
+        name: std::env::var("SNAKE_NAME")
+            .or_else(|_| std::env::var("USER"))
+            .unwrap_or_default(),
         log: std::env::var("SNAKE_LOG").ok(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
-        let mut value = |what: &str| it.next().ok_or_else(|| format!("параметру {arg} нужно значение ({what})"));
+        let mut value = |what: &str| {
+            it.next()
+                .ok_or_else(|| format!("параметру {arg} нужно значение ({what})"))
+        };
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
             "--no-server" => a.server = None,
@@ -54,7 +59,13 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--server" => a.server = Some(value("host:port")?),
             "--name" => a.name = value("имя")?,
             "--log" => a.log = Some(value("файл")?),
-            "--port" => a.port = Some(value("порт")?.parse().map_err(|_| "порт должен быть числом 1–65535".to_owned())?),
+            "--port" => {
+                a.port = Some(
+                    value("порт")?
+                        .parse()
+                        .map_err(|_| "порт должен быть числом 1–65535".to_owned())?,
+                )
+            }
             other => return Err(format!("неизвестный параметр {other}; см. --help")),
         }
     }
@@ -62,7 +73,9 @@ fn parse_args() -> Result<Option<Args>, String> {
 }
 
 fn unix_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 fn main() -> ExitCode {
@@ -87,13 +100,21 @@ fn main() -> ExitCode {
         }
     };
 
-    let seed = unix_secs() ^ u64::from(std::process::id()).rotate_left(32) ^ u64::from(net.local_port());
+    let seed =
+        unix_secs() ^ u64::from(std::process::id()).rotate_left(32) ^ u64::from(net.local_port());
     // Для нового сеанса на прежнем порту счётчик msg_seq должен превышать всё, что слали раньше.
-    let first_seq = if args.port.is_some() { (unix_secs() as i64) * 100 } else { 1 };
+    let first_seq = if args.port.is_some() {
+        (unix_secs() as i64) * 100
+    } else {
+        1
+    };
     let mut node = Node::new(start, seed, first_seq);
     node.set_local(net.local_ips(), net.local_port());
 
-    let mut log = args.log.as_ref().and_then(|p| OpenOptions::new().create(true).append(true).open(p).ok());
+    let mut log = args
+        .log
+        .as_ref()
+        .and_then(|p| OpenOptions::new().create(true).append(true).open(p).ok());
     node.set_trace(log.is_some());
 
     let resolver = args.server.clone().map(spawn_resolver);
@@ -148,7 +169,11 @@ fn main() -> ExitCode {
             }
             if let Some(f) = log.as_mut() {
                 for line in node.drain_trace() {
-                    let _ = writeln!(f, "[{:>9.3}] {line}", now.duration_since(start).as_secs_f64());
+                    let _ = writeln!(
+                        f,
+                        "[{:>9.3}] {line}",
+                        now.duration_since(start).as_secs_f64()
+                    );
                 }
             }
 
@@ -156,7 +181,9 @@ fn main() -> ExitCode {
                 return Ok(());
             }
             // Выход не должен зависать: передача управления и повторы Leave ограничены по времени.
-            if node.is_quitting() && quit_seen.get_or_insert(now).elapsed() > Duration::from_millis(2000) {
+            if node.is_quitting()
+                && quit_seen.get_or_insert(now).elapsed() > Duration::from_millis(2000)
+            {
                 return Ok(());
             }
 

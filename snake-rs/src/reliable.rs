@@ -64,7 +64,12 @@ impl Outbox {
                 }
                 self.out.push(Out::Unicast(to, bytes));
             }
-            Err(e) => self.fault = Some(format!("сообщение {} не удалось закодировать: {e:?}", m.body.name())),
+            Err(e) => {
+                self.fault = Some(format!(
+                    "сообщение {} не удалось закодировать: {e:?}",
+                    m.body.name()
+                ))
+            }
         }
     }
 
@@ -76,7 +81,12 @@ impl Outbox {
                 }
                 self.out.push(Out::Multicast(bytes));
             }
-            Err(e) => self.fault = Some(format!("сообщение {} не удалось закодировать: {e:?}", m.body.name())),
+            Err(e) => {
+                self.fault = Some(format!(
+                    "сообщение {} не удалось закодировать: {e:?}",
+                    m.body.name()
+                ))
+            }
         }
     }
 
@@ -90,11 +100,25 @@ impl Outbox {
 /// Короткое описание сообщения для журнала.
 pub fn describe(m: &Message) -> String {
     let extra = match &m.body {
-        Body::State(s) => format!(" order={} snakes={} players={}", s.order, s.snakes.len(), s.players.len()),
+        Body::State(s) => format!(
+            " order={} snakes={} players={}",
+            s.order,
+            s.snakes.len(),
+            s.players.len()
+        ),
         Body::Steer(d) => format!(" {d:?}"),
-        Body::Join { player_name, game_name, status, .. } => format!(" player={player_name:?} game={game_name:?} {status:?}"),
+        Body::Join {
+            player_name,
+            game_name,
+            status,
+            ..
+        } => format!(" player={player_name:?} game={game_name:?} {status:?}"),
         Body::Error { text, request_seq } => format!(" {text:?} request_seq={request_seq}"),
-        Body::RoleChange { sender, receiver, order } => format!(" {sender:?}->{receiver:?} order={order}"),
+        Body::RoleChange {
+            sender,
+            receiver,
+            order,
+        } => format!(" {sender:?}->{receiver:?} order={order}"),
         Body::StatusChange(s) => format!(" {s:?}"),
         Body::Announcement(g) => format!(" games={}", g.len()),
         _ => String::new(),
@@ -224,16 +248,28 @@ impl Reliable {
     }
 
     pub fn classify(&self, addr: SocketAddrV4, seq: i64) -> Seen {
-        self.windows.get(&addr).map_or(Seen::New, |w| w.classify(seq))
+        self.windows
+            .get(&addr)
+            .map_or(Seen::New, |w| w.classify(seq))
     }
 
     pub fn record(&mut self, addr: SocketAddrV4, seq: i64, reply: Option<Message>) {
-        self.windows.entry(addr).or_insert_with(Window::new).record(seq, reply);
+        self.windows
+            .entry(addr)
+            .or_insert_with(Window::new)
+            .record(seq, reply);
     }
 
     /// Ставит сообщение в очередь на подтверждение и отправляет его сразу.
     /// Возвращает отправленное сообщение (с присвоенным `msg_seq`).
-    pub fn send_request(&mut self, ob: &mut Outbox, now: Instant, to: SocketAddrV4, kind: Kind, mut msg: Message) -> Message {
+    pub fn send_request(
+        &mut self,
+        ob: &mut Outbox,
+        now: Instant,
+        to: SocketAddrV4,
+        kind: Kind,
+        mut msg: Message,
+    ) -> Message {
         let link = self.links.entry(to).or_insert_with(|| Link::new(now));
         match kind {
             Kind::Steer | Kind::State => link.pending.retain(|p| p.kind != kind),
@@ -265,7 +301,15 @@ impl Reliable {
     }
 
     /// Отправляет ACK на запрос и возвращает его (его сохраняют в окне для повторов).
-    pub fn send_ack(&mut self, ob: &mut Outbox, now: Instant, to: SocketAddrV4, req_seq: i64, sender_id: Option<i32>, receiver_id: Option<i32>, game: &str) -> Message {
+    pub fn send_ack(
+        &mut self,
+        ob: &mut Outbox,
+        now: Instant,
+        to: SocketAddrV4,
+        req_seq: i64,
+        (sender_id, receiver_id): (Option<i32>, Option<i32>),
+        game: &str,
+    ) -> Message {
         let ack = Message {
             seq: req_seq,
             sender_id,
@@ -281,7 +325,13 @@ impl Reliable {
     }
 
     /// Повторяет сохранённый ответ на дубликат запроса.
-    pub fn resend_reply(&mut self, ob: &mut Outbox, now: Instant, to: SocketAddrV4, reply: &Message) {
+    pub fn resend_reply(
+        &mut self,
+        ob: &mut Outbox,
+        now: Instant,
+        to: SocketAddrV4,
+        reply: &Message,
+    ) {
         ob.unicast(to, reply);
         if let Some(link) = self.links.get_mut(&to) {
             link.last_tx = now;
@@ -305,7 +355,13 @@ impl Reliable {
 
     /// Повторы, Ping и поиск недоступных соседей. Возвращает адреса, от которых
     /// слишком давно ничего нет; что с ними делать, решает вызывающий.
-    pub fn tick(&mut self, ob: &mut Outbox, now: Instant, game: &str, my_id: Option<i32>) -> Vec<SocketAddrV4> {
+    pub fn tick(
+        &mut self,
+        ob: &mut Outbox,
+        now: Instant,
+        game: &str,
+        my_id: Option<i32>,
+    ) -> Vec<SocketAddrV4> {
         let mut dead = Vec::new();
         for (&addr, link) in self.links.iter_mut() {
             let max_sent = link.max_req_sent;
@@ -352,7 +408,13 @@ impl Reliable {
 
     /// Переносит связь на новый endpoint (смена MASTER): неподтверждённые запросы
     /// сохраняют номера и содержимое, меняются адрес и `receiver_id`.
-    pub fn retarget(&mut self, from: SocketAddrV4, to: SocketAddrV4, new_peer_id: Option<i32>, now: Instant) {
+    pub fn retarget(
+        &mut self,
+        from: SocketAddrV4,
+        to: SocketAddrV4,
+        new_peer_id: Option<i32>,
+        now: Instant,
+    ) {
         let mut link = self.links.remove(&from).unwrap_or_else(|| Link::new(now));
         for p in &mut link.pending {
             p.msg.receiver_id = new_peer_id;
@@ -413,7 +475,10 @@ mod tests {
         rel.tick(&mut ob, t0 + Duration::from_millis(120), "g", Some(1));
         assert_eq!(ob.out.len(), 2);
 
-        assert!(rel.on_ack(t0 + Duration::from_millis(130), addr(1), 10).is_some());
+        assert!(
+            rel.on_ack(t0 + Duration::from_millis(130), addr(1), 10)
+                .is_some()
+        );
         rel.tick(&mut ob, t0 + Duration::from_millis(400), "g", Some(1));
         assert_eq!(ob.out.len(), 2, "после ACK повторов нет");
     }
@@ -436,7 +501,10 @@ mod tests {
         let mut rel = Reliable::new();
         let t0 = Instant::now();
         rel.link(addr(1), t0).ping = true;
-        assert!(rel.tick(&mut ob, t0 + Duration::from_millis(50), "g", Some(1)).is_empty());
+        assert!(
+            rel.tick(&mut ob, t0 + Duration::from_millis(50), "g", Some(1))
+                .is_empty()
+        );
         assert!(ob.out.is_empty());
         rel.tick(&mut ob, t0 + Duration::from_millis(110), "g", Some(1));
         assert_eq!(ob.out.len(), 1, "должен уйти Ping");

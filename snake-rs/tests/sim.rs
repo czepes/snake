@@ -93,7 +93,11 @@ impl Sim {
         }
         let copies = if self.chance(self.dup) { 2 } else { 1 };
         for _ in 0..copies {
-            let jitter = if self.jitter_ms > 0 { self.rng.next_u64() % (self.jitter_ms + 1) } else { 0 };
+            let jitter = if self.jitter_ms > 0 {
+                self.rng.next_u64() % (self.jitter_ms + 1)
+            } else {
+                0
+            };
             self.queue.push(Packet {
                 at: self.now + Duration::from_millis(self.latency_ms + jitter),
                 to,
@@ -109,7 +113,10 @@ impl Sim {
             for i in 0..self.nodes.len() {
                 self.nodes[i].node.set_trace(true);
                 for line in self.nodes[i].node.drain_trace() {
-                    eprintln!("[{:>6}ms n{i}] {line}", self.now.duration_since(self.t0).as_millis());
+                    eprintln!(
+                        "[{:>6}ms n{i}] {line}",
+                        self.now.duration_since(self.t0).as_millis()
+                    );
                 }
             }
         }
@@ -124,10 +131,10 @@ impl Sim {
             for out in outs {
                 match out {
                     Out::Unicast(to, bytes) => {
-                        if let Some(j) = index_of(to) {
-                            if j < self.nodes.len() {
-                                self.schedule(j, from, false, bytes);
-                            }
+                        if let Some(j) = index_of(to)
+                            && j < self.nodes.len()
+                        {
+                            self.schedule(j, from, false, bytes);
                         }
                     }
                     Out::Multicast(bytes) => {
@@ -147,17 +154,31 @@ impl Sim {
             return;
         }
         // Сервер курса создаёт игру по Join с новым именем.
-        if self.server == Some(p.to) && self.nodes[p.to].node.phase() == PhaseKind::Lobby {
-            if let Ok(m) = decode(&p.bytes) {
-                if let Body::Join { game_name, .. } = m.body {
-                    let cfg = Config { width: 20, height: 15, food_static: 2, state_delay_ms: 200 };
-                    self.nodes[p.to].node.command(self.now, Command::Host { game: game_name, player: "Сервер".into(), cfg });
-                }
-            }
+        if self.server == Some(p.to)
+            && self.nodes[p.to].node.phase() == PhaseKind::Lobby
+            && let Ok(m) = decode(&p.bytes)
+            && let Body::Join { game_name, .. } = m.body
+        {
+            let cfg = Config {
+                width: 20,
+                height: 15,
+                food_static: 2,
+                state_delay_ms: 200,
+            };
+            self.nodes[p.to].node.command(
+                self.now,
+                Command::Host {
+                    game: game_name,
+                    player: "Сервер".into(),
+                    cfg,
+                },
+            );
         }
         self.history.push((p.to, p.from, p.bytes.clone()));
         let now = self.now;
-        self.nodes[p.to].node.on_datagram(now, p.from, p.mc, &p.bytes);
+        self.nodes[p.to]
+            .node
+            .on_datagram(now, p.from, p.mc, &p.bytes);
     }
 
     fn step(&mut self, ms: u64) {
@@ -208,7 +229,10 @@ impl Sim {
     }
 
     fn view(&self, i: usize) -> GameView<'_> {
-        self.nodes[i].node.game_view().unwrap_or_else(|| panic!("узел {i} не в игре"))
+        self.nodes[i]
+            .node
+            .game_view()
+            .unwrap_or_else(|| panic!("узел {i} не в игре"))
     }
 
     fn in_game(&self, i: usize) -> bool {
@@ -222,18 +246,46 @@ impl Sim {
     fn failures(&self, i: usize) -> Vec<String> {
         self.events(i)
             .iter()
-            .filter_map(|e| if let Event::Failure(t) = e { Some(t.clone()) } else { None })
+            .filter_map(|e| {
+                if let Event::Failure(t) = e {
+                    Some(t.clone())
+                } else {
+                    None
+                }
+            })
             .collect()
     }
 
     fn host(&mut self, i: usize, name: &str, player: &str) {
-        let cfg = Config { width: 20, height: 15, food_static: 2, state_delay_ms: 200 };
-        self.cmd(i, Command::Host { game: name.into(), player: player.into(), cfg });
+        let cfg = Config {
+            width: 20,
+            height: 15,
+            food_static: 2,
+            state_delay_ms: 200,
+        };
+        self.cmd(
+            i,
+            Command::Host {
+                game: name.into(),
+                player: player.into(),
+                cfg,
+            },
+        );
     }
 
     fn join(&mut self, i: usize, host: usize, name: &str, player: &str, status: PlayerStatus) {
-        let key = GameKey { name: name.into(), addr: addr_of(host) };
-        self.cmd(i, Command::Join { key, player: player.into(), status });
+        let key = GameKey {
+            name: name.into(),
+            addr: addr_of(host),
+        };
+        self.cmd(
+            i,
+            Command::Join {
+                key,
+                player: player.into(),
+                status,
+            },
+        );
     }
 }
 
@@ -247,8 +299,17 @@ fn assert_consistent(sim: &Sim, nodes: &[usize]) {
     let reference = sim.view(nodes[0]);
     for &i in &nodes[1..] {
         let v = sim.view(i);
-        assert!((v.order - reference.order).abs() <= 2, "порядок состояний расходится: {} и {}", v.order, reference.order);
-        assert_eq!(ids(&v), ids(&reference), "составы участников расходятся у узла {i}");
+        assert!(
+            (v.order - reference.order).abs() <= 2,
+            "порядок состояний расходится: {} и {}",
+            v.order,
+            reference.order
+        );
+        assert_eq!(
+            ids(&v),
+            ids(&reference),
+            "составы участников расходятся у узла {i}"
+        );
     }
 }
 
@@ -262,19 +323,47 @@ fn lan_discovery_then_join_playing_and_viewing() {
     // Анонсы дошли до лобби остальных узлов.
     assert_eq!(sim.node(1).catalog_entries().len(), 1);
     let key = sim.node(1).catalog_entries()[0].key.clone();
-    sim.cmd(1, Command::Join { key: key.clone(), player: "Петя".into(), status: PlayerStatus::Playing });
-    sim.cmd(2, Command::Join { key, player: "Маша".into(), status: PlayerStatus::Viewing });
+    sim.cmd(
+        1,
+        Command::Join {
+            key: key.clone(),
+            player: "Петя".into(),
+            status: PlayerStatus::Playing,
+        },
+    );
+    sim.cmd(
+        2,
+        Command::Join {
+            key,
+            player: "Маша".into(),
+            status: PlayerStatus::Viewing,
+        },
+    );
     sim.run(1500);
 
     for i in 0..3 {
-        assert!(sim.in_game(i), "узел {i} должен быть в игре; события: {:?}", sim.events(i));
+        assert!(
+            sim.in_game(i),
+            "узел {i} должен быть в игре; события: {:?}",
+            sim.events(i)
+        );
     }
     let host = sim.view(0);
     assert_eq!(host.role, NodeRole::Master);
     assert_eq!(host.players.len(), 3);
     assert_eq!(ids(&host), vec![1, 2, 3]);
-    assert_eq!(host.world.snakes.len(), 2, "змейки у Васи и Пети, Маша наблюдает");
-    assert_eq!(host.players.iter().filter(|p| p.role == NodeRole::Deputy).count(), 1);
+    assert_eq!(
+        host.world.snakes.len(),
+        2,
+        "змейки у Васи и Пети, Маша наблюдает"
+    );
+    assert_eq!(
+        host.players
+            .iter()
+            .filter(|p| p.role == NodeRole::Deputy)
+            .count(),
+        1
+    );
     assert_eq!(sim.view(1).status, PlayerStatus::Playing);
     assert_eq!(sim.view(2).status, PlayerStatus::Viewing);
     assert_consistent(&sim, &[0, 1, 2]);
@@ -342,7 +431,9 @@ fn dead_player_becomes_viewer_and_keeps_score_and_role() {
         w.snakes.retain(|s| s.owner == 1);
         w.snakes.push(Snake {
             owner: 2,
-            cells: [(10, 7), (10, 8), (11, 8), (11, 7), (11, 6), (10, 6)].into_iter().collect(),
+            cells: [(10, 7), (10, 8), (11, 8), (11, 7), (11, 6), (10, 6)]
+                .into_iter()
+                .collect(),
             dir: Dir::Up,
         });
         w.foods.clear();
@@ -371,10 +462,23 @@ fn join_succeeds_despite_loss_duplicates_and_reordering() {
         assert!(sim.in_game(i), "узел {i}: {:?}", sim.events(i));
     }
     let host = sim.view(0);
-    assert_eq!(host.players.len(), 4, "участники: {:?}; события ведущего: {:?}", host.players.iter().map(|p| (&p.name, p.id)).collect::<Vec<_>>(), sim.events(0));
+    assert_eq!(
+        host.players.len(),
+        4,
+        "участники: {:?}; события ведущего: {:?}",
+        host.players
+            .iter()
+            .map(|p| (&p.name, p.id))
+            .collect::<Vec<_>>(),
+        sim.events(0)
+    );
     assert_eq!(ids(&host), vec![1, 2, 3, 4]);
     // Инвариант: змейка есть ровно у тех, кто играет (кто-то мог погибнуть за 10 секунд).
-    let playing = host.players.iter().filter(|p| p.status == PlayerStatus::Playing).count();
+    let playing = host
+        .players
+        .iter()
+        .filter(|p| p.status == PlayerStatus::Playing)
+        .count();
     assert_eq!(host.world.snakes.len(), playing);
     assert_consistent(&sim, &[0, 1, 2, 3]);
 }
@@ -408,9 +512,19 @@ fn replayed_join_does_not_create_another_participant() {
 #[test]
 fn join_to_unreachable_game_fails_with_reason() {
     let mut sim = Sim::new(2, 7);
-    let key = GameKey { name: "нет такой".into(), addr: addr_of(1) };
+    let key = GameKey {
+        name: "нет такой".into(),
+        addr: addr_of(1),
+    };
     sim.kill(1);
-    sim.cmd(0, Command::Join { key, player: "A".into(), status: PlayerStatus::Playing });
+    sim.cmd(
+        0,
+        Command::Join {
+            key,
+            player: "A".into(),
+            status: PlayerStatus::Playing,
+        },
+    );
     sim.run(4900);
     assert_eq!(sim.node(0).phase(), PhaseKind::Joining);
     sim.run(400);
@@ -433,7 +547,13 @@ fn seventh_participant_is_rejected_with_error_text() {
     sim.join(6, 0, "g", "late", PlayerStatus::Viewing);
     sim.run(800);
     assert_eq!(sim.node(6).phase(), PhaseKind::Lobby);
-    assert!(sim.failures(6).iter().any(|f| f.contains("нет свободных мест")), "{:?}", sim.failures(6));
+    assert!(
+        sim.failures(6)
+            .iter()
+            .any(|f| f.contains("нет свободных мест")),
+        "{:?}",
+        sim.failures(6)
+    );
 }
 
 #[test]
@@ -449,7 +569,11 @@ fn fifth_player_gets_error_but_can_watch() {
     sim.join(4, 0, "g", "five", PlayerStatus::Playing);
     sim.run(900);
     assert_eq!(sim.node(4).phase(), PhaseKind::Lobby);
-    assert!(sim.failures(4).iter().any(|f| f.contains("Нет места")), "{:?}", sim.failures(4));
+    assert!(
+        sim.failures(4).iter().any(|f| f.contains("Нет места")),
+        "{:?}",
+        sim.failures(4)
+    );
 
     sim.join(4, 0, "g", "five", PlayerStatus::Viewing);
     sim.run(900);
@@ -458,7 +582,11 @@ fn fifth_player_gets_error_but_can_watch() {
     sim.cmd(4, Command::ToggleWatch);
     sim.run(900);
     assert_eq!(sim.view(4).status, PlayerStatus::Viewing);
-    assert!(sim.failures(4).iter().any(|f| f.contains("4 змейки")), "{:?}", sim.failures(4));
+    assert!(
+        sim.failures(4).iter().any(|f| f.contains("4 змейки")),
+        "{:?}",
+        sim.failures(4)
+    );
 }
 
 #[test]
@@ -474,7 +602,10 @@ fn silent_participant_is_removed_by_master() {
     sim.run(1600);
     let host = sim.view(0);
     assert_eq!(host.players.len(), 2);
-    assert!(host.world.snake(3).is_none(), "змейка удалённого участника исчезает");
+    assert!(
+        host.world.snake(3).is_none(),
+        "змейка удалённого участника исчезает"
+    );
     assert_eq!(sim.view(1).players.len(), 2);
 }
 
@@ -486,16 +617,27 @@ fn deputy_takes_over_when_master_dies() {
     sim.join(1, 0, "g", "B", PlayerStatus::Playing);
     sim.join(2, 0, "g", "C", PlayerStatus::Playing);
     sim.run(2000);
-    let deputy = (1..3).find(|&i| sim.view(i).role == NodeRole::Deputy).expect("заместитель назначен");
+    let deputy = (1..3)
+        .find(|&i| sim.view(i).role == NodeRole::Deputy)
+        .expect("заместитель назначен");
     let other = 3 - deputy;
     let order_before = sim.view(deputy).order;
 
     sim.kill(0);
     sim.run(3000);
 
-    assert_eq!(sim.view(deputy).role, NodeRole::Master, "события: {:?}", sim.events(deputy));
+    assert_eq!(
+        sim.view(deputy).role,
+        NodeRole::Master,
+        "события: {:?}",
+        sim.events(deputy)
+    );
     let v = sim.view(other);
-    assert_eq!(v.master, Some(addr_of(deputy)), "второй узел переключился на нового ведущего");
+    assert_eq!(
+        v.master,
+        Some(addr_of(deputy)),
+        "второй узел переключился на нового ведущего"
+    );
     assert!(v.order > order_before, "состояния продолжают публиковаться");
     assert!(sim.in_game(other), "{:?}", sim.failures(other));
     // Прежний ведущий и его змейка удалены, остальные на месте.
@@ -515,7 +657,9 @@ fn commands_still_work_after_failover() {
     sim.join(1, 0, "g", "B", PlayerStatus::Playing);
     sim.join(2, 0, "g", "C", PlayerStatus::Playing);
     sim.run(2000);
-    let deputy = (1..3).find(|&i| sim.view(i).role == NodeRole::Deputy).unwrap();
+    let deputy = (1..3)
+        .find(|&i| sim.view(i).role == NodeRole::Deputy)
+        .unwrap();
     let other = 3 - deputy;
     sim.kill(0);
     sim.run(3000);
@@ -533,7 +677,11 @@ fn commands_still_work_after_failover() {
     let snakes_after = sim.view(deputy).world.snakes.len();
     assert_eq!(
         snakes_after as i32 - snakes_before as i32,
-        if expected == PlayerStatus::Playing { 1 } else { -1 }
+        if expected == PlayerStatus::Playing {
+            1
+        } else {
+            -1
+        }
     );
 }
 
@@ -545,12 +693,19 @@ fn graceful_master_exit_hands_over_without_timeout() {
     sim.join(1, 0, "g", "B", PlayerStatus::Playing);
     sim.join(2, 0, "g", "C", PlayerStatus::Playing);
     sim.run(2000);
-    let deputy = (1..3).find(|&i| sim.view(i).role == NodeRole::Deputy).unwrap();
+    let deputy = (1..3)
+        .find(|&i| sim.view(i).role == NodeRole::Deputy)
+        .unwrap();
 
     sim.cmd(0, Command::Leave);
     sim.run(500); // заметно быстрее тайм-аута связи в 1000 мс
     assert_eq!(sim.node(0).phase(), PhaseKind::Lobby);
-    assert_eq!(sim.view(deputy).role, NodeRole::Master, "{:?}", sim.events(deputy));
+    assert_eq!(
+        sim.view(deputy).role,
+        NodeRole::Master,
+        "{:?}",
+        sim.events(deputy)
+    );
     assert!(sim.view(deputy).players.iter().all(|p| p.name != "A"));
     sim.run(1500);
     assert!(sim.in_game(1) && sim.in_game(2));
@@ -579,11 +734,17 @@ fn deputy_is_reassigned_after_deputy_leaves() {
     sim.join(1, 0, "g", "B", PlayerStatus::Viewing);
     sim.join(2, 0, "g", "C", PlayerStatus::Viewing);
     sim.run(2000);
-    let deputy = (1..3).find(|&i| sim.view(i).role == NodeRole::Deputy).unwrap();
+    let deputy = (1..3)
+        .find(|&i| sim.view(i).role == NodeRole::Deputy)
+        .unwrap();
     let other = 3 - deputy;
     sim.cmd(deputy, Command::Leave);
     sim.run(1200);
-    assert_eq!(sim.view(other).role, NodeRole::Deputy, "наблюдатель тоже может стать заместителем");
+    assert_eq!(
+        sim.view(other).role,
+        NodeRole::Deputy,
+        "наблюдатель тоже может стать заместителем"
+    );
 }
 
 #[test]
@@ -595,14 +756,18 @@ fn everyone_lost_gives_error_with_reason() {
     sim.join(2, 0, "g", "C", PlayerStatus::Playing);
     sim.run(2000);
     // Недоступны и ведущий, и заместитель: оставшийся участник сообщает причину.
-    let deputy = (1..3).find(|&i| sim.view(i).role == NodeRole::Deputy).unwrap();
+    let deputy = (1..3)
+        .find(|&i| sim.view(i).role == NodeRole::Deputy)
+        .unwrap();
     let other = 3 - deputy;
     sim.kill(0);
     sim.kill(deputy);
     sim.run(4000);
     assert_eq!(sim.node(other).phase(), PhaseKind::Lobby);
     assert!(
-        sim.failures(other).iter().any(|f| f.contains("заместитель")),
+        sim.failures(other)
+            .iter()
+            .any(|f| f.contains("заместитель")),
         "{:?}",
         sim.failures(other)
     );
@@ -613,9 +778,20 @@ fn server_style_creation_by_join_learns_config_via_discover() {
     let mut sim = Sim::new(2, 17);
     sim.server = Some(1);
     sim.nodes[0].node.set_server(Some(addr_of(1)));
-    sim.cmd(0, Command::HostOnServer { game: "новая".into(), player: "Гость".into() });
+    sim.cmd(
+        0,
+        Command::HostOnServer {
+            game: "новая".into(),
+            player: "Гость".into(),
+        },
+    );
     sim.run(2500);
-    assert!(sim.in_game(0), "события: {:?}; {:?}", sim.events(0), sim.failures(0));
+    assert!(
+        sim.in_game(0),
+        "события: {:?}; {:?}",
+        sim.events(0),
+        sim.failures(0)
+    );
     assert_eq!(sim.view(0).name, "новая");
     assert_eq!(sim.view(0).players.len(), 2);
 }
@@ -630,7 +806,10 @@ fn same_game_from_lan_and_server_is_listed_once() {
     assert_eq!(entries.len(), 1);
     let now = sim.now;
     assert!(entries[0].from_lan(now), "пришло по multicast");
-    assert!(entries[0].from_server(now), "пришло ответом сервера на Discover");
+    assert!(
+        entries[0].from_server(now),
+        "пришло ответом сервера на Discover"
+    );
     assert!(sim.node(1).server_online(now));
 }
 
@@ -669,7 +848,9 @@ fn states_apply_in_order_and_old_ones_are_ignored() {
     };
     let bytes = encode(&stale).unwrap();
     let now = sim.now;
-    sim.nodes[1].node.on_datagram(now, addr_of(0), false, &bytes);
+    sim.nodes[1]
+        .node
+        .on_datagram(now, addr_of(0), false, &bytes);
     assert!(sim.view(1).order >= before);
 }
 
@@ -683,7 +864,10 @@ fn many_unique_ids_across_leave_and_rejoin() {
         sim.join(1, 0, "g", "B", PlayerStatus::Viewing);
         sim.run(900);
         assert!(sim.in_game(1), "раунд {round}: {:?}", sim.events(1));
-        assert!(seen.insert(sim.view(1).my_id), "ID не должны переиспользоваться");
+        assert!(
+            seen.insert(sim.view(1).my_id),
+            "ID не должны переиспользоваться"
+        );
         sim.cmd(1, Command::Leave);
         sim.run(500);
     }
@@ -705,19 +889,36 @@ fn lossy_network_failover_fuzz() {
         }
         sim.run(7000);
         let joined: Vec<usize> = (1..4).filter(|&i| sim.in_game(i)).collect();
-        assert_eq!(joined.len(), 3, "seed {seed}: не все присоединились: {:?}", (1..4).map(|i| sim.failures(i)).collect::<Vec<_>>());
+        assert_eq!(
+            joined.len(),
+            3,
+            "seed {seed}: не все присоединились: {:?}",
+            (1..4).map(|i| sim.failures(i)).collect::<Vec<_>>()
+        );
         assert_eq!(sim.view(0).players.len(), 4, "seed {seed}");
 
         sim.kill(0);
         sim.run(8000);
         let alive: Vec<usize> = (1..4).filter(|&i| sim.in_game(i)).collect();
         assert!(!alive.is_empty(), "seed {seed}: все вышли из игры");
-        let masters: Vec<usize> = alive.iter().copied().filter(|&i| sim.view(i).role == NodeRole::Master).collect();
-        assert_eq!(masters.len(), 1, "seed {seed}: ведущих должно быть ровно один, сейчас {masters:?}");
+        let masters: Vec<usize> = alive
+            .iter()
+            .copied()
+            .filter(|&i| sim.view(i).role == NodeRole::Master)
+            .collect();
+        assert_eq!(
+            masters.len(),
+            1,
+            "seed {seed}: ведущих должно быть ровно один, сейчас {masters:?}"
+        );
         let m = masters[0];
         for &i in &alive {
             if i != m {
-                assert_eq!(sim.view(i).master, Some(addr_of(m)), "seed {seed}: узел {i} не последовал за новым ведущим");
+                assert_eq!(
+                    sim.view(i).master,
+                    Some(addr_of(m)),
+                    "seed {seed}: узел {i} не последовал за новым ведущим"
+                );
             }
         }
         // Состав участников согласован и без старого ведущего.

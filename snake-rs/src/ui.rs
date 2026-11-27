@@ -14,7 +14,9 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Cell as TCell, Clear, Paragraph, Row, Table, Wrap};
 
 use crate::node::{Command, Event, GameView, Node, PhaseKind};
-use crate::wire::{Config, Dir, MAX_SNAKES, NodeRole, PlayerStatus, valid_game_name, valid_player_name};
+use crate::wire::{
+    Config, Dir, MAX_SNAKES, NodeRole, PlayerStatus, valid_game_name, valid_player_name,
+};
 
 const PALETTE: [Color; 6] = [
     Color::LightRed,
@@ -122,7 +124,10 @@ impl Ui {
         match node.phase() {
             PhaseKind::InGame => self.key_game(key, node, now),
             PhaseKind::Joining => {
-                if matches!(key.code, KeyCode::Esc | KeyCode::Char('q' | 'Q' | 'й' | 'Й')) {
+                if matches!(
+                    key.code,
+                    KeyCode::Esc | KeyCode::Char('q' | 'Q' | 'й' | 'Й')
+                ) {
                     node.command(now, Command::Leave);
                 }
             }
@@ -149,7 +154,9 @@ impl Ui {
         match key.code {
             KeyCode::Char('v' | 'V' | 'м' | 'М') => node.command(now, Command::ToggleWatch),
             KeyCode::Char('r' | 'R' | 'к' | 'К') => node.command(now, Command::InviteRobot),
-            KeyCode::Esc | KeyCode::Char('q' | 'Q' | 'й' | 'Й') => node.command(now, Command::Leave),
+            KeyCode::Esc | KeyCode::Char('q' | 'Q' | 'й' | 'Й') => {
+                node.command(now, Command::Leave)
+            }
             _ => {}
         }
     }
@@ -163,8 +170,12 @@ impl Ui {
                     self.selected += 1;
                 }
             }
-            KeyCode::Enter | KeyCode::Char('p' | 'P' | 'з' | 'З' | 'l' | 'L') => self.join(node, now, PlayerStatus::Playing),
-            KeyCode::Char('v' | 'V' | 'м' | 'М' | 'h' | 'H') => self.join(node, now, PlayerStatus::Viewing),
+            KeyCode::Enter | KeyCode::Char('p' | 'P' | 'з' | 'З' | 'l' | 'L') => {
+                self.join(node, now, PlayerStatus::Playing)
+            }
+            KeyCode::Char('v' | 'V' | 'м' | 'М' | 'h' | 'H') => {
+                self.join(node, now, PlayerStatus::Viewing)
+            }
             KeyCode::Char('c' | 'C' | 'с' | 'С') => {
                 self.form.error = None;
                 self.screen = Screen::Create;
@@ -173,7 +184,9 @@ impl Ui {
                 self.name_buf = self.player_name.clone();
                 self.screen = Screen::EditName;
             }
-            KeyCode::Esc | KeyCode::Char('q' | 'Q' | 'й' | 'Й') => node.command(now, Command::Quit),
+            KeyCode::Esc | KeyCode::Char('q' | 'Q' | 'й' | 'Й') => {
+                node.command(now, Command::Quit)
+            }
             _ => {}
         }
     }
@@ -182,7 +195,11 @@ impl Ui {
         let (key, can_play, can_watch) = {
             let entries = node.catalog_entries();
             let Some(e) = entries.get(self.selected) else {
-                self.say(now, "Выберите игру из списка (она появится, когда будет найдена)", true);
+                self.say(
+                    now,
+                    "Выберите игру из списка (она появится, когда будет найдена)",
+                    true,
+                );
                 return;
             };
             (e.key.clone(), e.can_play(), e.can_watch())
@@ -191,7 +208,11 @@ impl Ui {
             self.say(now, "Задайте имя игрока: клавиша N", true);
             return;
         }
-        let ok = if status == PlayerStatus::Playing { can_play } else { can_watch };
+        let ok = if status == PlayerStatus::Playing {
+            can_play
+        } else {
+            can_watch
+        };
         if !ok {
             let why = if status == PlayerStatus::Playing && can_watch {
                 "Нет места для змейки: нажмите V, чтобы наблюдать"
@@ -201,7 +222,14 @@ impl Ui {
             self.say(now, why, true);
             return;
         }
-        node.command(now, Command::Join { key, player: self.player_name.clone(), status });
+        node.command(
+            now,
+            Command::Join {
+                key,
+                player: self.player_name.clone(),
+                status,
+            },
+        );
     }
 
     fn key_name(&mut self, key: KeyEvent, now: Instant) {
@@ -218,7 +246,9 @@ impl Ui {
             KeyCode::Backspace => {
                 self.name_buf.pop();
             }
-            KeyCode::Char(c) if !c.is_control() && self.name_buf.len() + c.len_utf8() <= 24 => self.name_buf.push(c),
+            KeyCode::Char(c) if !c.is_control() && self.name_buf.len() + c.len_utf8() <= 24 => {
+                self.name_buf.push(c)
+            }
             _ => {}
         }
     }
@@ -228,10 +258,12 @@ impl Ui {
         let f = &mut self.form;
         match key.code {
             KeyCode::Esc => self.screen = Screen::Lobby,
-            KeyCode::Tab | KeyCode::Down | KeyCode::Char('j' | 'J')
-                => f.field = (f.field + 1) % FIELDS,
-            KeyCode::BackTab | KeyCode::Up | KeyCode::Char('k' | 'K')
-                => f.field = (f.field + FIELDS - 1) % FIELDS,
+            KeyCode::Tab | KeyCode::Down | KeyCode::Char('j' | 'J') => {
+                f.field = (f.field + 1) % FIELDS
+            }
+            KeyCode::BackTab | KeyCode::Up | KeyCode::Char('k' | 'K') => {
+                f.field = (f.field + FIELDS - 1) % FIELDS
+            }
             KeyCode::Enter => self.submit_form(node, now),
             KeyCode::Backspace => {
                 match f.field {
@@ -243,8 +275,14 @@ impl Ui {
                     _ => None,
                 };
             }
-            KeyCode::Left | KeyCode::Char('h' | 'H') | KeyCode::Right | KeyCode::Char('l' | 'L')
-                if f.field == 5 => f.on_server = !f.on_server,
+            KeyCode::Left
+            | KeyCode::Char('h' | 'H')
+            | KeyCode::Right
+            | KeyCode::Char('l' | 'L')
+                if f.field == 5 =>
+            {
+                f.on_server = !f.on_server
+            }
             KeyCode::Char(' ') if f.field == 5 => f.on_server = !f.on_server,
             KeyCode::Char(c) => match f.field {
                 0 if !c.is_control() && f.game.len() + c.len_utf8() <= 32 => f.game.push(c),
@@ -269,7 +307,13 @@ impl Ui {
             return;
         }
         if self.form.on_server {
-            node.command(now, Command::HostOnServer { game, player: self.player_name.clone() });
+            node.command(
+                now,
+                Command::HostOnServer {
+                    game,
+                    player: self.player_name.clone(),
+                },
+            );
             self.screen = Screen::Lobby;
             return;
         }
@@ -284,7 +328,14 @@ impl Ui {
             self.form.error = Some("Ширина и высота: 10–100, еда: 0–10, ход: 100–3000 мс".into());
             return;
         }
-        node.command(now, Command::Host { game, player: self.player_name.clone(), cfg });
+        node.command(
+            now,
+            Command::Host {
+                game,
+                player: self.player_name.clone(),
+                cfg,
+            },
+        );
         self.screen = Screen::Lobby;
     }
 
@@ -335,7 +386,9 @@ impl Ui {
         ];
 
         // Блок по центру: ширина = max(длина строк, 24), высота = число строк + 2 (рамка).
-        let w = (text.iter().map(|l| l.width()).max().unwrap_or(0) as u16 + 4).max(28).min(area.width);
+        let w = (text.iter().map(|l| l.width()).max().unwrap_or(0) as u16 + 4)
+            .max(28)
+            .min(area.width);
         let h = (text.len() as u16 + 2).min(area.height);
         let rect = centered(area, w, h);
 
@@ -407,7 +460,12 @@ impl Ui {
             rows[0],
         );
 
-        let dot = |ok: bool| Span::styled("● ", Style::new().fg(if ok { Color::Green } else { Color::Red }));
+        let dot = |ok: bool| {
+            Span::styled(
+                "● ",
+                Style::new().fg(if ok { Color::Green } else { Color::Red }),
+            )
+        };
         let server_text = if !node.server_known() {
             "адрес не определён"
         } else if node.server_online(now) {
@@ -418,7 +476,14 @@ impl Ui {
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 dot(lan_ok),
-                Span::raw(format!("Локальная сеть: {}    ", if lan_ok { "доступна" } else { "недоступна" })),
+                Span::raw(format!(
+                    "Локальная сеть: {}    ",
+                    if lan_ok {
+                        "доступна"
+                    } else {
+                        "недоступна"
+                    }
+                )),
                 dot(node.server_online(now)),
                 Span::raw(format!("Сервер курса: {server_text}")),
             ])),
@@ -482,8 +547,16 @@ impl Ui {
                 ],
             )
             .header(
-                Row::new(vec!["Игра", "Источник", "Участники", "Змейки", "Поле", "Ход", "Доступно"])
-                    .style(Style::new().add_modifier(Modifier::BOLD).fg(Color::Yellow)),
+                Row::new(vec![
+                    "Игра",
+                    "Источник",
+                    "Участники",
+                    "Змейки",
+                    "Поле",
+                    "Ход",
+                    "Доступно",
+                ])
+                .style(Style::new().add_modifier(Modifier::BOLD).fg(Color::Yellow)),
             )
             .block(Block::bordered().title(" Доступные игры "));
             f.render_widget(table, rows[2]);
@@ -507,12 +580,22 @@ impl Ui {
             Paragraph::new(vec![
                 Line::from(self.name_buf.clone() + "▏"),
                 Line::from(""),
-                Line::from(Span::styled("Enter — сохранить, Esc — отмена", Style::new().fg(Color::DarkGray))),
+                Line::from(Span::styled(
+                    "Enter — сохранить, Esc — отмена",
+                    Style::new().fg(Color::DarkGray),
+                )),
             ])
             .block(Block::bordered().title(" Ваше имя ")),
             area,
         );
-        f.render_widget(self.message_line(), Rect { y: area.y + area.height, height: 1, ..area });
+        f.render_widget(
+            self.message_line(),
+            Rect {
+                y: area.y + area.height,
+                height: 1,
+                ..area
+            },
+        );
     }
 
     fn draw_create(&mut self, f: &mut Frame) {
@@ -529,7 +612,10 @@ impl Ui {
                 Style::new()
             };
             Line::from(Span::styled(
-                format!("{marker}{label:<22}{value}{}", if fm.field == i { "▏" } else { "" }),
+                format!(
+                    "{marker}{label:<22}{value}{}",
+                    if fm.field == i { "▏" } else { "" }
+                ),
                 style,
             ))
         };
@@ -540,17 +626,32 @@ impl Ui {
             field(2, "Высота (10–100):", &fm.height, dim),
             field(3, "Запас еды (0–10):", &fm.food, dim),
             field(4, "Ход, мс (100–3000):", &fm.delay, dim),
-            field(5, "Создать на сервере:", if fm.on_server { "да (параметры задаст сервер)" } else { "нет, локально" }, false),
+            field(
+                5,
+                "Создать на сервере:",
+                if fm.on_server {
+                    "да (параметры задаст сервер)"
+                } else {
+                    "нет, локально"
+                },
+                false,
+            ),
             Line::from(""),
         ];
         if let Some(e) = &fm.error {
-            lines.push(Line::from(Span::styled(e.clone(), Style::new().fg(Color::Red))));
+            lines.push(Line::from(Span::styled(
+                e.clone(),
+                Style::new().fg(Color::Red),
+            )));
         }
         lines.push(Line::from(Span::styled(
             "Tab/↑↓ — поле, Пробел — переключить, Enter — создать, Esc — назад",
             Style::new().fg(Color::DarkGray),
         )));
-        f.render_widget(Paragraph::new(lines).block(Block::bordered().title(" Новая игра ")), area);
+        f.render_widget(
+            Paragraph::new(lines).block(Block::bordered().title(" Новая игра ")),
+            area,
+        );
     }
 
     fn draw_joining(&self, f: &mut Frame, node: &Node, now: Instant) {
@@ -571,7 +672,10 @@ impl Ui {
                 Line::from(step),
                 Line::from(format!("Прошло {secs:.1} с из 5")),
                 Line::from(""),
-                Line::from(Span::styled("Esc — отмена", Style::new().fg(Color::DarkGray))),
+                Line::from(Span::styled(
+                    "Esc — отмена",
+                    Style::new().fg(Color::DarkGray),
+                )),
             ])
             .alignment(Alignment::Center)
             .block(Block::bordered().title(" Присоединение ")),
@@ -580,7 +684,12 @@ impl Ui {
     }
 
     fn draw_game(&self, f: &mut Frame, v: &GameView) {
-        let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(6), Constraint::Length(3)]).split(f.area());
+        let rows = Layout::vertical([
+            Constraint::Length(2),
+            Constraint::Min(6),
+            Constraint::Length(3),
+        ])
+        .split(f.area());
 
         let role = match (v.role, v.status) {
             (NodeRole::Master, _) => "вы ведущий",
@@ -588,11 +697,17 @@ impl Ui {
             _ => "вы участник",
         };
         let mut head = vec![
-            Span::styled(format!("Змейка · {}", v.name), Style::new().add_modifier(Modifier::BOLD).fg(Color::Cyan)),
+            Span::styled(
+                format!("Змейка · {}", v.name),
+                Style::new().add_modifier(Modifier::BOLD).fg(Color::Cyan),
+            ),
             Span::raw(format!("   {role}")),
         ];
         if v.leaving {
-            head.push(Span::styled("   передача игры другому ведущему…", Style::new().fg(Color::Yellow)));
+            head.push(Span::styled(
+                "   передача игры другому ведущему…",
+                Style::new().fg(Color::Yellow),
+            ));
         }
         f.render_widget(Paragraph::new(Line::from(head)), rows[0]);
 
@@ -614,15 +729,28 @@ impl Ui {
         self.draw_side(f, v, body[1]);
 
         let state_line = match v.status {
-            PlayerStatus::Playing => "Вы играете: стрелки или WASD — поворот   [V] смотреть   [Q] выйти из игры".to_owned(),
+            PlayerStatus::Playing => {
+                "Вы играете: стрелки или WASD — поворот   [V] смотреть   [Q] выйти из игры"
+                    .to_owned()
+            }
             PlayerStatus::Viewing if v.status_pending => "Запрос отправлен ведущему…".to_owned(),
-            PlayerStatus::Viewing => "Вы наблюдаете. [V] вернуться в игру, если есть место   [Q] выйти из игры".to_owned(),
+            PlayerStatus::Viewing => {
+                "Вы наблюдаете. [V] вернуться в игру, если есть место   [Q] выйти из игры"
+                    .to_owned()
+            }
         };
         let mut footer = vec![Line::from(state_line)];
         if v.role == NodeRole::Master {
-            footer.push(Line::from(Span::styled("[R] пригласить робота с сервера курса", Style::new().fg(Color::DarkGray))));
+            footer.push(Line::from(Span::styled(
+                "[R] пригласить робота с сервера курса",
+                Style::new().fg(Color::DarkGray),
+            )));
         }
-        let foot = Layout::vertical([Constraint::Length(footer.len() as u16), Constraint::Length(1)]).split(rows[2]);
+        let foot = Layout::vertical([
+            Constraint::Length(footer.len() as u16),
+            Constraint::Length(1),
+        ])
+        .split(rows[2]);
         f.render_widget(Paragraph::new(footer), foot[0]);
         f.render_widget(self.message_line(), foot[1]);
     }
@@ -641,7 +769,8 @@ impl Ui {
 
         let mut order: Vec<i32> = v.players.iter().map(|p| p.id).collect();
         order.sort_unstable();
-        let color_of = |id: i32| PALETTE[order.iter().position(|&x| x == id).unwrap_or(0) % PALETTE.len()];
+        let color_of =
+            |id: i32| PALETTE[order.iter().position(|&x| x == id).unwrap_or(0) % PALETTE.len()];
 
         let mut occ: HashMap<(i32, i32), (Color, bool)> = HashMap::new();
         for s in &v.world.snakes {
@@ -659,15 +788,27 @@ impl Ui {
                 let cell = (x as i32, y as i32);
                 let span = if let Some(&(color, head)) = occ.get(&cell) {
                     match (head, cw) {
-                        (true, 2) => Span::styled("••", Style::new().bg(color).fg(Color::Black).add_modifier(Modifier::BOLD)),
+                        (true, 2) => Span::styled(
+                            "••",
+                            Style::new()
+                                .bg(color)
+                                .fg(Color::Black)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                         (true, _) => Span::styled("●", Style::new().bg(color).fg(Color::Black)),
                         (false, 2) => Span::styled("  ", Style::new().bg(color)),
                         (false, _) => Span::styled("█", Style::new().fg(color)),
                     }
                 } else if foods.contains(&cell) {
-                    Span::styled(if cw == 2 { "● " } else { "●" }, Style::new().fg(Color::Red).add_modifier(Modifier::BOLD))
+                    Span::styled(
+                        if cw == 2 { "● " } else { "●" },
+                        Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    )
                 } else {
-                    Span::styled(if cw == 2 { "· " } else { "·" }, Style::new().fg(Color::DarkGray))
+                    Span::styled(
+                        if cw == 2 { "· " } else { "·" },
+                        Style::new().fg(Color::DarkGray),
+                    )
                 };
                 spans.push(span);
             }
@@ -677,12 +818,20 @@ impl Ui {
         if vw < w || vh < h {
             title.push_str(&format!("· окно {vw}×{vh} "));
         }
-        f.render_widget(Paragraph::new(lines).block(Block::bordered().title(title)), area);
+        f.render_widget(
+            Paragraph::new(lines).block(Block::bordered().title(title)),
+            area,
+        );
     }
 
     fn draw_side(&self, f: &mut Frame, v: &GameView, area: Rect) {
         let players_h = (v.players.len() as u16 + 3).max(5);
-        let parts = Layout::vertical([Constraint::Length(players_h), Constraint::Length(8), Constraint::Min(0)]).split(area);
+        let parts = Layout::vertical([
+            Constraint::Length(players_h),
+            Constraint::Length(8),
+            Constraint::Min(0),
+        ])
+        .split(area);
 
         let mut order: Vec<i32> = v.players.iter().map(|p| p.id).collect();
         order.sort_unstable();
@@ -692,8 +841,12 @@ impl Ui {
             .iter()
             .map(|p| {
                 let has_snake = v.world.snake(p.id).is_some();
-                let color = PALETTE[order.iter().position(|&x| x == p.id).unwrap_or(0) % PALETTE.len()];
-                let swatch = Span::styled("■ ", Style::new().fg(if has_snake { color } else { Color::DarkGray }));
+                let color =
+                    PALETTE[order.iter().position(|&x| x == p.id).unwrap_or(0) % PALETTE.len()];
+                let swatch = Span::styled(
+                    "■ ",
+                    Style::new().fg(if has_snake { color } else { Color::DarkGray }),
+                );
                 let me = if p.id == v.my_id { " (вы)" } else { "" };
                 let role = match p.role {
                     NodeRole::Normal => "NORMAL",
@@ -704,9 +857,16 @@ impl Ui {
                     PlayerStatus::Playing => ("Играет", Style::new().fg(Color::Green)),
                     PlayerStatus::Viewing => ("Смотрит", Style::new().fg(Color::DarkGray)),
                 };
-                let name_style = if p.id == v.my_id { Style::new().add_modifier(Modifier::BOLD) } else { Style::new() };
+                let name_style = if p.id == v.my_id {
+                    Style::new().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::new()
+                };
                 Row::new(vec![
-                    TCell::from(Line::from(vec![swatch, Span::styled(format!("{}{me}", p.name), name_style)])),
+                    TCell::from(Line::from(vec![
+                        swatch,
+                        Span::styled(format!("{}{me}", p.name), name_style),
+                    ])),
                     TCell::from(p.score.to_string()),
                     TCell::from(role),
                     TCell::from(Span::styled(status, status_style)),
@@ -715,9 +875,17 @@ impl Ui {
             .collect();
         let table = Table::new(
             rows,
-            [Constraint::Min(10), Constraint::Length(5), Constraint::Length(7), Constraint::Length(8)],
+            [
+                Constraint::Min(10),
+                Constraint::Length(5),
+                Constraint::Length(7),
+                Constraint::Length(8),
+            ],
         )
-        .header(Row::new(vec!["Имя", "Очки", "Роль", "Статус"]).style(Style::new().add_modifier(Modifier::BOLD).fg(Color::Yellow)))
+        .header(
+            Row::new(vec!["Имя", "Очки", "Роль", "Статус"])
+                .style(Style::new().add_modifier(Modifier::BOLD).fg(Color::Yellow)),
+        )
         .block(Block::bordered().title(format!(" Участники · {}/6 ", v.players.len())));
         f.render_widget(table, parts[0]);
 

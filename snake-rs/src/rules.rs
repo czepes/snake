@@ -156,7 +156,10 @@ impl World {
     }
 
     pub fn wrap(&self, c: Cell) -> Cell {
-        (c.0.rem_euclid(self.cfg.width), c.1.rem_euclid(self.cfg.height))
+        (
+            c.0.rem_euclid(self.cfg.width),
+            c.1.rem_euclid(self.cfg.height),
+        )
     }
 
     pub fn advance(&self, c: Cell, d: Dir) -> Cell {
@@ -179,7 +182,10 @@ impl World {
     }
 
     pub fn occupied(&self) -> HashSet<Cell> {
-        self.snakes.iter().flat_map(|s| s.cells.iter().copied()).collect()
+        self.snakes
+            .iter()
+            .flat_map(|s| s.cells.iter().copied())
+            .collect()
     }
 
     pub fn remove_snake(&mut self, owner: i32) -> bool {
@@ -408,7 +414,11 @@ mod tests {
         let mut steer = HashMap::new();
         steer.insert(1, Dir::Left);
         let r = w.step(&steer);
-        assert!(r.dead.is_empty(), "змейка не должна погибнуть: {:?}", w.snakes);
+        assert!(
+            r.dead.is_empty(),
+            "змейка не должна погибнуть: {:?}",
+            w.snakes
+        );
     }
 
     #[test]
@@ -455,7 +465,11 @@ mod tests {
     #[test]
     fn self_collision_scores_nothing() {
         let mut w = world(
-            vec![snake(1, &[(5, 5), (5, 6), (4, 6), (4, 5), (4, 4), (5, 4)], Dir::Up)],
+            vec![snake(
+                1,
+                &[(5, 5), (5, 6), (4, 6), (4, 5), (4, 4), (5, 4)],
+                Dir::Up,
+            )],
             vec![],
         );
         let mut steer = HashMap::new();
@@ -501,7 +515,11 @@ mod tests {
         for owner in 1..=4 {
             assert!(w.place_snake(owner, &mut rng), "змейка {owner}");
         }
-        let all: Vec<Cell> = w.snakes.iter().flat_map(|s| s.cells.iter().copied()).collect();
+        let all: Vec<Cell> = w
+            .snakes
+            .iter()
+            .flat_map(|s| s.cells.iter().copied())
+            .collect();
         let unique: HashSet<Cell> = all.iter().copied().collect();
         assert_eq!(all.len(), unique.len());
         // Хвост действительно позади головы.

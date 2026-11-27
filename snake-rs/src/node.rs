@@ -26,10 +26,21 @@ pub const LEAVE_DEADLINE: Duration = Duration::from_millis(1000);
 #[derive(Clone, Debug)]
 pub enum Command {
     /// Создать игру, ведущим которой станет этот узел.
-    Host { game: String, player: String, cfg: Config },
+    Host {
+        game: String,
+        player: String,
+        cfg: Config,
+    },
     /// Создать игру на сервере курса: Join с новым именем.
-    HostOnServer { game: String, player: String },
-    Join { key: GameKey, player: String, status: PlayerStatus },
+    HostOnServer {
+        game: String,
+        player: String,
+    },
+    Join {
+        key: GameKey,
+        player: String,
+        status: PlayerStatus,
+    },
     Steer(Dir),
     /// Перейти из игрока в наблюдатели и обратно.
     ToggleWatch,
@@ -190,7 +201,13 @@ enum JoinStep {
     Failed(String),
 }
 
-fn mk(seq: i64, sender: Option<i32>, receiver: Option<i32>, game: Option<&str>, body: Body) -> Message {
+fn mk(
+    seq: i64,
+    sender: Option<i32>,
+    receiver: Option<i32>,
+    game: Option<&str>,
+    body: Body,
+) -> Message {
     Message {
         seq,
         sender_id: sender,
@@ -203,7 +220,15 @@ fn mk(seq: i64, sender: Option<i32>, receiver: Option<i32>, game: Option<&str>, 
 /// Принимает входящий запрос с подтверждением: проверяет окно дедупликации,
 /// повторяет сохранённый ответ на дубликат и отправляет ACK на новый запрос.
 /// Возвращает `true`, если запрос нужно обработать.
-fn accept_request(rel: &mut Reliable, cx: &mut Ctx, from: SocketAddrV4, msg: &Message, my_id: Option<i32>, peer_id: Option<i32>, game: &str) -> bool {
+fn accept_request(
+    rel: &mut Reliable,
+    cx: &mut Ctx,
+    from: SocketAddrV4,
+    msg: &Message,
+    my_id: Option<i32>,
+    peer_id: Option<i32>,
+    game: &str,
+) -> bool {
     match rel.classify(from, msg.seq) {
         Seen::TooOld => false,
         Seen::Duplicate(reply) => {
@@ -216,7 +241,7 @@ fn accept_request(rel: &mut Reliable, cx: &mut Ctx, from: SocketAddrV4, msg: &Me
             if !rel.can_admit(from) {
                 return false;
             }
-            let ack = rel.send_ack(cx.ob, cx.now, from, msg.seq, my_id, peer_id, game);
+            let ack = rel.send_ack(cx.ob, cx.now, from, msg.seq, (my_id, peer_id), game);
             rel.record(from, msg.seq, Some(ack));
             true
         }
@@ -226,7 +251,10 @@ fn accept_request(rel: &mut Reliable, cx: &mut Ctx, from: SocketAddrV4, msg: &Me
 /// Проверяет снимок состояния и превращает его в мир. Проверка намеренно
 /// мягкая в деталях правил: цель — не пропустить мусор, а не отвергнуть
 /// корректное состояние чужой реализации.
-fn validate_state(cfg: Config, s: &StateMsg) -> Result<(World, Vec<PlayerInfo>, i32), &'static str> {
+fn validate_state(
+    cfg: Config,
+    s: &StateMsg,
+) -> Result<(World, Vec<PlayerInfo>, i32), &'static str> {
     if s.order < 0 {
         return Err("отрицательный state_order");
     }
@@ -242,10 +270,20 @@ fn validate_state(cfg: Config, s: &StateMsg) -> Result<(World, Vec<PlayerInfo>, 
     if ids.len() != s.players.len() {
         return Err("повторяющиеся ID участников");
     }
-    if s.players.iter().filter(|p| p.role == NodeRole::Master).count() != 1 {
+    if s.players
+        .iter()
+        .filter(|p| p.role == NodeRole::Master)
+        .count()
+        != 1
+    {
         return Err("в состоянии должен быть ровно один MASTER");
     }
-    if s.players.iter().filter(|p| p.role == NodeRole::Deputy).count() > 1 {
+    if s.players
+        .iter()
+        .filter(|p| p.role == NodeRole::Deputy)
+        .count()
+        > 1
+    {
         return Err("в состоянии больше одного DEPUTY");
     }
     let mut world = World::new(cfg);
@@ -274,7 +312,9 @@ impl Game {
             return Err(format!("Недопустимое имя игры (1–{MAX_GAME_NAME} байт)"));
         }
         if !valid_player_name(&player) {
-            return Err(format!("Недопустимое имя игрока (1–{MAX_PLAYER_NAME} байт)"));
+            return Err(format!(
+                "Недопустимое имя игрока (1–{MAX_PLAYER_NAME} байт)"
+            ));
         }
         if !cfg.is_valid() {
             return Err("Параметры игры вне допустимых границ".into());
@@ -320,11 +360,16 @@ impl Game {
     }
 
     fn master_id(&self) -> Option<i32> {
-        self.players.iter().find(|p| p.role == NodeRole::Master).map(|p| p.id)
+        self.players
+            .iter()
+            .find(|p| p.role == NodeRole::Master)
+            .map(|p| p.id)
     }
 
     fn deputy(&self) -> Option<&PlayerInfo> {
-        self.players.iter().find(|p| p.role == NodeRole::Deputy && p.id != self.my_id)
+        self.players
+            .iter()
+            .find(|p| p.role == NodeRole::Deputy && p.id != self.my_id)
     }
 
     fn build_state(&self) -> StateMsg {
@@ -377,18 +422,22 @@ impl Game {
             let m = self.msg(Some(id), Body::State(state.clone()));
             self.rel.send_request(cx.ob, cx.now, addr, Kind::State, m);
         }
-        if let Some(id) = self.m.deputy_notice.take() {
-            if let Some(addr) = self.players.iter().find(|p| p.id == id).and_then(|p| p.addr) {
-                let m = self.msg(
-                    Some(id),
-                    Body::RoleChange {
-                        sender: None,
-                        receiver: Some(NodeRole::Deputy),
-                        order: self.order,
-                    },
-                );
-                self.rel.send_request(cx.ob, cx.now, addr, Kind::Control, m);
-            }
+        if let Some(id) = self.m.deputy_notice.take()
+            && let Some(addr) = self
+                .players
+                .iter()
+                .find(|p| p.id == id)
+                .and_then(|p| p.addr)
+        {
+            let m = self.msg(
+                Some(id),
+                Body::RoleChange {
+                    sender: None,
+                    receiver: Some(NodeRole::Deputy),
+                    order: self.order,
+                },
+            );
+            self.rel.send_request(cx.ob, cx.now, addr, Kind::Control, m);
         }
     }
 
@@ -419,7 +468,12 @@ impl Game {
     }
 
     /// Меняет статус участника. `Ok(true)` — статус изменился.
-    fn set_status(&mut self, cx: &mut Ctx, id: i32, target: PlayerStatus) -> Result<bool, &'static str> {
+    fn set_status(
+        &mut self,
+        cx: &mut Ctx,
+        id: i32,
+        target: PlayerStatus,
+    ) -> Result<bool, &'static str> {
         let Some(cur) = self.players.iter().find(|p| p.id == id).map(|p| p.status) else {
             return Err("участник не найден");
         };
@@ -456,7 +510,14 @@ impl Game {
         self.publish(cx);
     }
 
-    fn m_error(&mut self, cx: &mut Ctx, to: SocketAddrV4, receiver: Option<i32>, req_seq: i64, text: &str) {
+    fn m_error(
+        &mut self,
+        cx: &mut Ctx,
+        to: SocketAddrV4,
+        receiver: Option<i32>,
+        req_seq: i64,
+        text: &str,
+    ) {
         let m = self.msg(
             receiver,
             Body::Error {
@@ -485,14 +546,27 @@ impl Game {
         if !self.rel.can_admit(from) {
             return Flow::Continue;
         }
-        let Body::Join { ptype, player_name, status, .. } = msg.body else {
+        let Body::Join {
+            ptype,
+            player_name,
+            status,
+            ..
+        } = msg.body
+        else {
             return Flow::Continue;
         };
 
         // Уже подключённый endpoint получает прежний ID без новой змейки.
         if let Some(existing) = self.players.iter().find(|p| p.addr == Some(from)) {
             let id = existing.id;
-            let ack = self.rel.send_ack(cx.ob, cx.now, from, msg.seq, Some(self.my_id), Some(id), &self.name);
+            let ack = self.rel.send_ack(
+                cx.ob,
+                cx.now,
+                from,
+                msg.seq,
+                (Some(self.my_id), Some(id)),
+                &self.name,
+            );
             self.rel.record(from, msg.seq, Some(ack));
             return Flow::Continue;
         }
@@ -511,11 +585,17 @@ impl Game {
         }
 
         let id = self.next_id;
-        if status == PlayerStatus::Playing {
-            if self.world.snakes.len() >= MAX_SNAKES || !self.world.place_snake(id, cx.rng) {
-                self.m_error(cx, from, None, msg.seq, "Нет места для змейки: можно только наблюдать");
-                return Flow::Continue;
-            }
+        if status == PlayerStatus::Playing
+            && (self.world.snakes.len() >= MAX_SNAKES || !self.world.place_snake(id, cx.rng))
+        {
+            self.m_error(
+                cx,
+                from,
+                None,
+                msg.seq,
+                "Нет места для змейки: можно только наблюдать",
+            );
+            return Flow::Continue;
         }
         self.next_id += 1;
         self.players.push(PlayerInfo {
@@ -531,9 +611,19 @@ impl Game {
         link.peer_id = Some(id);
         link.ping = true;
         link.last_rx = cx.now;
-        let ack = self.rel.send_ack(cx.ob, cx.now, from, msg.seq, Some(self.my_id), Some(id), &self.name);
+        let ack = self.rel.send_ack(
+            cx.ob,
+            cx.now,
+            from,
+            msg.seq,
+            (Some(self.my_id), Some(id)),
+            &self.name,
+        );
         self.rel.record(from, msg.seq, Some(ack));
-        cx.notice(format!("К игре присоединился «{}»", self.players.last().map_or("", |p| p.name.as_str())));
+        cx.notice(format!(
+            "К игре присоединился «{}»",
+            self.players.last().map_or("", |p| p.name.as_str())
+        ));
         self.after_change(cx);
         Flow::Continue
     }
@@ -565,7 +655,9 @@ impl Game {
         let Some(pl) = self.players.iter().find(|p| p.addr == Some(from)).cloned() else {
             return Flow::Continue;
         };
-        if msg.sender_id.is_some_and(|s| s != pl.id) || msg.receiver_id.is_some_and(|r| r != self.my_id) {
+        if msg.sender_id.is_some_and(|s| s != pl.id)
+            || msg.receiver_id.is_some_and(|r| r != self.my_id)
+        {
             return Flow::Continue;
         }
         if !self.rel.can_admit(from) {
@@ -575,7 +667,14 @@ impl Game {
 
         match msg.body {
             Body::Ping => {
-                let ack = self.rel.send_ack(cx.ob, cx.now, from, msg.seq, Some(self.my_id), Some(pl.id), &self.name);
+                let ack = self.rel.send_ack(
+                    cx.ob,
+                    cx.now,
+                    from,
+                    msg.seq,
+                    (Some(self.my_id), Some(pl.id)),
+                    &self.name,
+                );
                 self.rel.record(from, msg.seq, Some(ack));
             }
             Body::Steer(dir) => {
@@ -586,20 +685,41 @@ impl Game {
                         self.m.steers.insert(pl.id, (msg.seq, dir));
                     }
                 }
-                let ack = self.rel.send_ack(cx.ob, cx.now, from, msg.seq, Some(self.my_id), Some(pl.id), &self.name);
+                let ack = self.rel.send_ack(
+                    cx.ob,
+                    cx.now,
+                    from,
+                    msg.seq,
+                    (Some(self.my_id), Some(pl.id)),
+                    &self.name,
+                );
                 self.rel.record(from, msg.seq, Some(ack));
             }
             Body::StatusChange(target) => {
                 let last = self.m.status_seq.get(&pl.id).copied().unwrap_or(-1);
                 if msg.seq <= last {
-                    let ack = self.rel.send_ack(cx.ob, cx.now, from, msg.seq, Some(self.my_id), Some(pl.id), &self.name);
+                    let ack = self.rel.send_ack(
+                        cx.ob,
+                        cx.now,
+                        from,
+                        msg.seq,
+                        (Some(self.my_id), Some(pl.id)),
+                        &self.name,
+                    );
                     self.rel.record(from, msg.seq, Some(ack));
                     return Flow::Continue;
                 }
                 self.m.status_seq.insert(pl.id, msg.seq);
                 match self.set_status(cx, pl.id, target) {
                     Ok(changed) => {
-                        let ack = self.rel.send_ack(cx.ob, cx.now, from, msg.seq, Some(self.my_id), Some(pl.id), &self.name);
+                        let ack = self.rel.send_ack(
+                            cx.ob,
+                            cx.now,
+                            from,
+                            msg.seq,
+                            (Some(self.my_id), Some(pl.id)),
+                            &self.name,
+                        );
                         self.rel.record(from, msg.seq, Some(ack));
                         if changed {
                             self.after_change(cx);
@@ -609,7 +729,14 @@ impl Game {
                 }
             }
             Body::Leave => {
-                let ack = self.rel.send_ack(cx.ob, cx.now, from, msg.seq, Some(self.my_id), Some(pl.id), &self.name);
+                let ack = self.rel.send_ack(
+                    cx.ob,
+                    cx.now,
+                    from,
+                    msg.seq,
+                    (Some(self.my_id), Some(pl.id)),
+                    &self.name,
+                );
                 self.rel.record(from, msg.seq, Some(ack));
                 cx.notice(format!("«{}» вышел из игры", pl.name));
                 self.remove_player(pl.id);
@@ -632,7 +759,10 @@ impl Game {
             let to = l.to;
             let order = self.order.saturating_add(1);
             let m = self.msg(
-                self.players.iter().find(|p| p.addr == Some(to)).map(|p| p.id),
+                self.players
+                    .iter()
+                    .find(|p| p.addr == Some(to))
+                    .map(|p| p.id),
                 Body::RoleChange {
                     sender: Some(NodeRole::Normal),
                     receiver: Some(NodeRole::Master),
@@ -675,7 +805,8 @@ impl Game {
 
         let delay = Duration::from_millis(self.cfg().state_delay_ms as u64);
         if cx.now >= self.m.next_tick {
-            let steers: HashMap<i32, crate::wire::Dir> = self.m.steers.iter().map(|(&id, &(_, d))| (id, d)).collect();
+            let steers: HashMap<i32, crate::wire::Dir> =
+                self.m.steers.iter().map(|(&id, &(_, d))| (id, d)).collect();
             self.m.steers.clear();
             let result = self.world.step(&steers);
             for (owner, delta) in result.points {
@@ -702,7 +833,13 @@ impl Game {
         }
 
         if cx.now >= self.m.next_announce {
-            let m = mk(cx.ob.seq(), None, None, None, Body::Announcement(vec![self.announcement()]));
+            let m = mk(
+                cx.ob.seq(),
+                None,
+                None,
+                None,
+                Body::Announcement(vec![self.announcement()]),
+            );
             cx.ob.multicast(&m);
             self.m.next_announce = cx.now + ANNOUNCE_PERIOD;
         }
@@ -715,7 +852,9 @@ impl Game {
         let (world, players, next_id) = match validate_state(self.cfg(), &s) {
             Ok(v) => v,
             Err(why) => {
-                cx.ev.push(Event::Notice(format!("Получено некорректное состояние: {why}")));
+                cx.ev.push(Event::Notice(format!(
+                    "Получено некорректное состояние: {why}"
+                )));
                 return Ok(());
             }
         };
@@ -741,10 +880,14 @@ impl Game {
         let from_master = Some(from) == self.master_addr;
         if !from_master {
             // Смена ведущего: заместитель сообщает, что взял управление на себя.
-            if let Body::RoleChange { sender: Some(NodeRole::Master), order, .. } = msg.body {
-                if self.deputy().and_then(|d| d.addr) == Some(from) {
-                    return self.p_switch_master(cx, from, &msg, order);
-                }
+            if let Body::RoleChange {
+                sender: Some(NodeRole::Master),
+                order,
+                ..
+            } = msg.body
+                && self.deputy().and_then(|d| d.addr) == Some(from)
+            {
+                return self.p_switch_master(cx, from, &msg, order);
             }
             return Flow::Continue;
         }
@@ -760,31 +903,68 @@ impl Game {
                 self.rel.on_ack(cx.now, from, msg.seq);
             }
             Body::Ping => {
-                accept_request(&mut self.rel, cx, from, &msg, Some(self.my_id), peer, &self.name);
+                accept_request(
+                    &mut self.rel,
+                    cx,
+                    from,
+                    &msg,
+                    Some(self.my_id),
+                    peer,
+                    &self.name,
+                );
             }
             Body::State(ref s) => {
-                if accept_request(&mut self.rel, cx, from, &msg, Some(self.my_id), peer, &self.name) && s.order > self.order {
-                    if let Err(why) = self.apply_state(cx, s.clone()) {
-                        return Flow::Ended(why);
-                    }
+                if accept_request(
+                    &mut self.rel,
+                    cx,
+                    from,
+                    &msg,
+                    Some(self.my_id),
+                    peer,
+                    &self.name,
+                ) && s.order > self.order
+                    && let Err(why) = self.apply_state(cx, s.clone())
+                {
+                    return Flow::Ended(why);
                 }
             }
             Body::Error { ref text, .. } => {
-                if accept_request(&mut self.rel, cx, from, &msg, Some(self.my_id), peer, &self.name) {
+                if accept_request(
+                    &mut self.rel,
+                    cx,
+                    from,
+                    &msg,
+                    Some(self.my_id),
+                    peer,
+                    &self.name,
+                ) {
                     cx.ev.push(Event::Failure(text.clone()));
                 }
             }
-            Body::RoleChange { sender, receiver, order } => {
-                if accept_request(&mut self.rel, cx, from, &msg, Some(self.my_id), peer, &self.name) {
-                    match (sender, receiver) {
-                        (Some(NodeRole::Normal), Some(NodeRole::Master)) if self.role == NodeRole::Deputy => {
-                            return self.become_master(cx, Some(order));
-                        }
-                        (_, Some(NodeRole::Deputy)) if order >= self.order => {
-                            self.role = NodeRole::Deputy;
-                        }
-                        _ => {}
+            Body::RoleChange {
+                sender,
+                receiver,
+                order,
+            } if accept_request(
+                &mut self.rel,
+                cx,
+                from,
+                &msg,
+                Some(self.my_id),
+                peer,
+                &self.name,
+            ) =>
+            {
+                match (sender, receiver) {
+                    (Some(NodeRole::Normal), Some(NodeRole::Master))
+                        if self.role == NodeRole::Deputy =>
+                    {
+                        return self.become_master(cx, Some(order));
                     }
+                    (_, Some(NodeRole::Deputy)) if order >= self.order => {
+                        self.role = NodeRole::Deputy;
+                    }
+                    _ => {}
                 }
             }
             _ => {}
@@ -793,9 +973,23 @@ impl Game {
     }
 
     /// Заместитель взял управление: переключаем все запросы на него.
-    fn p_switch_master(&mut self, cx: &mut Ctx, from: SocketAddrV4, msg: &Message, order: i32) -> Flow {
+    fn p_switch_master(
+        &mut self,
+        cx: &mut Ctx,
+        from: SocketAddrV4,
+        msg: &Message,
+        order: i32,
+    ) -> Flow {
         let deputy_id = self.deputy().map(|d| d.id);
-        if !accept_request(&mut self.rel, cx, from, msg, Some(self.my_id), deputy_id, &self.name) {
+        if !accept_request(
+            &mut self.rel,
+            cx,
+            from,
+            msg,
+            Some(self.my_id),
+            deputy_id,
+            &self.name,
+        ) {
             return Flow::Continue;
         }
         if order < self.order {
@@ -812,11 +1006,12 @@ impl Game {
 
     fn p_tick(&mut self, cx: &mut Ctx) -> Flow {
         let dead = self.rel.tick(cx.ob, cx.now, &self.name, Some(self.my_id));
-        if let Some(m) = self.master_addr {
-            if dead.contains(&m) {
-                return self.master_lost(cx);
-            }
+        if let Some(m) = self.master_addr
+            && dead.contains(&m)
+        {
+            return self.master_lost(cx);
         }
+
         Flow::Continue
     }
 
@@ -826,7 +1021,9 @@ impl Game {
             return self.become_master(cx, None);
         }
         if self.failover_used {
-            return Flow::Failed("Связь с игрой потеряна: заместитель ведущего тоже не отвечает".into());
+            return Flow::Failed(
+                "Связь с игрой потеряна: заместитель ведущего тоже не отвечает".into(),
+            );
         }
         let Some((id, addr)) = self.deputy().and_then(|d| d.addr.map(|a| (d.id, a))) else {
             return Flow::Failed("Связь с игрой потеряна: заместителя ведущего нет".into());
@@ -843,10 +1040,10 @@ impl Game {
     /// Заместитель становится ведущим: при потере связи или по передаче управления.
     fn become_master(&mut self, cx: &mut Ctx, graceful_order: Option<i32>) -> Flow {
         let old_addr = self.master_addr.take();
-        if let Some(old_id) = self.master_id() {
-            if old_id != self.my_id {
-                self.remove_player(old_id);
-            }
+        if let Some(old_id) = self.master_id()
+            && old_id != self.my_id
+        {
+            self.remove_player(old_id);
         }
         if let Some(a) = old_addr {
             self.rel.links.remove(&a);
@@ -907,7 +1104,10 @@ impl Game {
         if self.role != NodeRole::Master {
             if let Some(to) = self.master_addr {
                 let msg = self.msg(self.master_id(), Body::Leave);
-                let msg = Message { seq: cx.ob.seq(), ..msg };
+                let msg = Message {
+                    seq: cx.ob.seq(),
+                    ..msg
+                };
                 cx.ob.unicast(to, &msg);
                 closing.push(Closing {
                     to,
@@ -921,7 +1121,12 @@ impl Game {
         let target = self
             .deputy()
             .and_then(|d| d.addr.map(|a| (d.id, a)))
-            .or_else(|| self.players.iter().find(|p| p.id != self.my_id && p.addr.is_some()).map(|p| (p.id, p.addr.unwrap())));
+            .or_else(|| {
+                self.players
+                    .iter()
+                    .find(|p| p.id != self.my_id && p.addr.is_some())
+                    .map(|p| (p.id, p.addr.unwrap()))
+            });
         let Some((id, addr)) = target else {
             return Flow::Left;
         };
@@ -954,10 +1159,10 @@ impl Game {
             return Flow::Continue;
         }
         if self.leaving.is_some() {
-            if matches!(msg.body, Body::Ack) {
-                if let Some(p) = self.rel.on_ack(cx.now, from, msg.seq) {
-                    self.on_acked(cx, from, &p.msg);
-                }
+            if matches!(msg.body, Body::Ack)
+                && let Some(p) = self.rel.on_ack(cx.now, from, msg.seq)
+            {
+                self.on_acked(cx, from, &p.msg);
             }
             return Flow::Continue;
         }
@@ -1015,7 +1220,13 @@ impl Game {
 // ─────────────────────────────── Присоединение ───────────────────────────────
 
 impl Joining {
-    fn start(cx: &mut Ctx, key: GameKey, player: String, status: PlayerStatus, cfg: Option<Config>) -> Joining {
+    fn start(
+        cx: &mut Ctx,
+        key: GameKey,
+        player: String,
+        status: PlayerStatus,
+        cfg: Option<Config>,
+    ) -> Joining {
         let mut rel = Reliable::new();
         let join = mk(
             0,
@@ -1063,21 +1274,25 @@ impl Joining {
         let name = self.key.name.clone();
         let my_id = self.my_id.or(self.early_id);
         match msg.body {
-            Body::Ack => {
-                if let Some(p) = self.rel.on_ack(cx.now, from, msg.seq) {
-                    if matches!(p.msg.body, Body::Join { .. }) {
-                        if let (Some(early), Some(given)) = (self.early_id, msg.receiver_id) {
-                            if early != given {
-                                return JoinStep::Failed("Ведущий выдал противоречивые ID участника".into());
-                            }
-                        }
-                        self.acked = true;
-                        self.my_id = msg.receiver_id.or(self.early_id);
-                        self.master_id = msg.sender_id;
+            Body::Ack if let Some(p) = self.rel.on_ack(cx.now, from, msg.seq) => {
+                if matches!(p.msg.body, Body::Join { .. }) {
+                    if let (Some(early), Some(given)) = (self.early_id, msg.receiver_id)
+                        && early != given
+                    {
+                        return JoinStep::Failed(
+                            "Ведущий выдал противоречивые ID участника".into(),
+                        );
                     }
+                    self.acked = true;
+                    self.my_id = msg.receiver_id.or(self.early_id);
+                    self.master_id = msg.sender_id;
                 }
             }
-            Body::Error { ref text, request_seq } => {
+            Body::Ack => {}
+            Body::Error {
+                ref text,
+                request_seq,
+            } => {
                 accept_request(&mut self.rel, cx, from, &msg, my_id, self.master_id, &name);
                 if request_seq == self.join_seq {
                     return JoinStep::Failed(format!("Ведущий отклонил присоединение: {text}"));
@@ -1088,7 +1303,10 @@ impl Joining {
                     if !self.acked {
                         self.early_id = self.early_id.or(msg.receiver_id);
                     }
-                    let newer = self.buffered.as_ref().is_none_or(|(b, _)| s.order > b.order);
+                    let newer = self
+                        .buffered
+                        .as_ref()
+                        .is_none_or(|(b, _)| s.order > b.order);
                     if newer {
                         self.buffered = Some((s.clone(), msg.receiver_id));
                     }
@@ -1116,7 +1334,9 @@ impl Joining {
         };
         let (world, players, next_id) = match validate_state(cfg, &state) {
             Ok(v) => v,
-            Err(why) => return JoinStep::Failed(format!("Получено некорректное состояние игры: {why}")),
+            Err(why) => {
+                return JoinStep::Failed(format!("Получено некорректное состояние игры: {why}"));
+            }
         };
         let Some(me) = players.iter().find(|p| p.id == my_id).cloned() else {
             return JoinStep::Failed("В состоянии игры нет вашего участника".into());
@@ -1124,7 +1344,10 @@ impl Joining {
         if me.role == NodeRole::Master {
             return JoinStep::Failed("Ведущий указал вас как ведущего".into());
         }
-        let master_id = players.iter().find(|p| p.role == NodeRole::Master).map(|p| p.id);
+        let master_id = players
+            .iter()
+            .find(|p| p.role == NodeRole::Master)
+            .map(|p| p.id);
         let mut rel = std::mem::take(&mut self.rel);
         let link = rel.link(self.key.addr, cx.now);
         link.peer_id = master_id;
@@ -1151,7 +1374,10 @@ impl Joining {
 
     fn tick(&mut self, cx: &mut Ctx) -> JoinStep {
         self.rel.tick(cx.ob, cx.now, &self.key.name, self.my_id);
-        if self.cfg.is_none() && self.acked && cx.now.duration_since(self.last_discover) >= JOIN_DISCOVER_PERIOD {
+        if self.cfg.is_none()
+            && self.acked
+            && cx.now.duration_since(self.last_discover) >= JOIN_DISCOVER_PERIOD
+        {
             let m = mk(cx.ob.seq(), None, None, None, Body::Discover);
             cx.ob.unicast(self.key.addr, &m);
             self.last_discover = cx.now;
@@ -1250,11 +1476,14 @@ impl Node {
 
     /// Отвечал ли сервер курса в последние секунды.
     pub fn server_online(&self, now: Instant) -> bool {
-        self.server_seen.is_some_and(|t| now.duration_since(t) <= Duration::from_millis(3000))
+        self.server_seen
+            .is_some_and(|t| now.duration_since(t) <= Duration::from_millis(3000))
     }
 
     pub fn game_view(&self) -> Option<GameView<'_>> {
-        let Phase::InGame(g) = &self.phase else { return None };
+        let Phase::InGame(g) = &self.phase else {
+            return None;
+        };
         Some(GameView {
             name: &g.name,
             cfg: g.cfg(),
@@ -1266,16 +1495,18 @@ impl Node {
             order: g.order,
             leaving: g.leaving.is_some(),
             master: g.master_addr,
-            status_pending: g
-                .rel
-                .links
-                .values()
-                .any(|l| l.pending.iter().any(|p| matches!(p.msg.body, Body::StatusChange(_)))),
+            status_pending: g.rel.links.values().any(|l| {
+                l.pending
+                    .iter()
+                    .any(|p| matches!(p.msg.body, Body::StatusChange(_)))
+            }),
         })
     }
 
     pub fn joining_view(&self) -> Option<JoiningView<'_>> {
-        let Phase::Joining(j) = &self.phase else { return None };
+        let Phase::Joining(j) = &self.phase else {
+            return None;
+        };
         Some(JoiningView {
             game: &j.key.name,
             started: j.started,
@@ -1307,8 +1538,23 @@ impl Node {
 
     pub fn command(&mut self, now: Instant, cmd: Command) {
         self.now = now;
-        let Node { phase, ob, events, rng, closing, catalog, server, quitting, .. } = self;
-        let mut cx = Ctx { now, ob, ev: events, rng };
+        let Node {
+            phase,
+            ob,
+            events,
+            rng,
+            closing,
+            catalog,
+            server,
+            quitting,
+            ..
+        } = self;
+        let mut cx = Ctx {
+            now,
+            ob,
+            ev: events,
+            rng,
+        };
         let mut flow = Flow::Continue;
 
         match cmd {
@@ -1328,21 +1574,37 @@ impl Node {
                     match *server {
                         Some(addr) if valid_game_name(&game) && valid_player_name(&player) => {
                             let key = GameKey { name: game, addr };
-                            *phase = Phase::Joining(Box::new(Joining::start(&mut cx, key, player, PlayerStatus::Playing, None)));
+                            *phase = Phase::Joining(Box::new(Joining::start(
+                                &mut cx,
+                                key,
+                                player,
+                                PlayerStatus::Playing,
+                                None,
+                            )));
                         }
-                        Some(_) => cx.ev.push(Event::Failure("Недопустимое имя игры или игрока".into())),
-                        None => cx.ev.push(Event::Failure("Адрес сервера курса неизвестен".into())),
+                        Some(_) => cx
+                            .ev
+                            .push(Event::Failure("Недопустимое имя игры или игрока".into())),
+                        None => cx
+                            .ev
+                            .push(Event::Failure("Адрес сервера курса неизвестен".into())),
                     }
                 }
             }
-            Command::Join { key, player, status } => {
+            Command::Join {
+                key,
+                player,
+                status,
+            } => {
                 if matches!(phase, Phase::Lobby) {
                     if !valid_player_name(&player) {
                         cx.ev.push(Event::Failure("Недопустимое имя игрока".into()));
                     } else {
                         // Конфигурация известна из анонса выбранной игры.
                         let cfg = catalog.get(&key).map(|e| e.config);
-                        *phase = Phase::Joining(Box::new(Joining::start(&mut cx, key, player, status, cfg)));
+                        *phase = Phase::Joining(Box::new(Joining::start(
+                            &mut cx, key, player, status, cfg,
+                        )));
                     }
                 }
             }
@@ -1356,21 +1618,30 @@ impl Node {
                     g.toggle_watch(&mut cx);
                 }
             }
-            Command::InviteRobot => {
-                if let (Phase::InGame(g), Some(srv)) = (&*phase, *server) {
-                    if g.role == NodeRole::Master && g.leaving.is_none() {
-                        let m = mk(cx.ob.seq(), None, None, None, Body::Announcement(vec![g.announcement()]));
-                        cx.ob.unicast(srv, &m);
-                        cx.notice("Приглашение отправлено серверу курса");
-                    }
-                }
+            Command::InviteRobot
+                if let (Phase::InGame(g), Some(srv)) = (&*phase, *server)
+                    && g.role == NodeRole::Master
+                    && g.leaving.is_none() =>
+            {
+                let m = mk(
+                    cx.ob.seq(),
+                    None,
+                    None,
+                    None,
+                    Body::Announcement(vec![g.announcement()]),
+                );
+                cx.ob.unicast(srv, &m);
+                cx.notice("Приглашение отправлено серверу курса");
             }
+            Command::InviteRobot => {}
             Command::Leave | Command::Quit => {
                 if matches!(cmd, Command::Quit) {
                     *quitting = true;
                 }
                 match phase {
-                    Phase::InGame(g) if g.leaving.is_none() => flow = g.begin_leave(&mut cx, closing),
+                    Phase::InGame(g) if g.leaving.is_none() => {
+                        flow = g.begin_leave(&mut cx, closing)
+                    }
                     Phase::Joining(_) => flow = Flow::Left,
                     _ => {}
                 }
@@ -1380,22 +1651,36 @@ impl Node {
         self.after_call();
     }
 
-    pub fn on_datagram(&mut self, now: Instant, from: SocketAddrV4, via_multicast: bool, bytes: &[u8]) {
+    pub fn on_datagram(
+        &mut self,
+        now: Instant,
+        from: SocketAddrV4,
+        via_multicast: bool,
+        bytes: &[u8],
+    ) {
         self.now = now;
         let msg = match decode(bytes) {
             Ok(m) => m,
             Err(e) => {
-                self.ob.note(|| format!("RX {from} отброшено: {} ({} байт)", e.0, bytes.len()));
+                self.ob
+                    .note(|| format!("RX {from} отброшено: {} ({} байт)", e.0, bytes.len()));
                 return;
             }
         };
-        self.ob.note(|| format!("RX {from}{} {}", if via_multicast { " [mc]" } else { "" }, describe(&msg)));
+        self.ob.note(|| {
+            format!(
+                "RX {from}{} {}",
+                if via_multicast { " [mc]" } else { "" },
+                describe(&msg)
+            )
+        });
         if Some(from) == self.server && !via_multicast {
             self.server_seen = Some(now);
         }
 
         if matches!(msg.body, Body::Ack) {
-            self.closing.retain(|c| !(c.to == from && c.msg.seq == msg.seq));
+            self.closing
+                .retain(|c| !(c.to == from && c.msg.seq == msg.seq));
         }
 
         match &msg.body {
@@ -1406,19 +1691,37 @@ impl Node {
                 return;
             }
             Body::Discover => {
-                if let Phase::InGame(g) = &self.phase {
-                    if g.role == NodeRole::Master && g.leaving.is_none() {
-                        let m = mk(self.ob.seq(), None, None, None, Body::Announcement(vec![g.announcement()]));
-                        self.ob.unicast(from, &m);
-                    }
+                if let Phase::InGame(g) = &self.phase
+                    && g.role == NodeRole::Master
+                    && g.leaving.is_none()
+                {
+                    let m = mk(
+                        self.ob.seq(),
+                        None,
+                        None,
+                        None,
+                        Body::Announcement(vec![g.announcement()]),
+                    );
+                    self.ob.unicast(from, &m);
                 }
                 return;
             }
             _ => {}
         }
 
-        let Node { phase, ob, events, rng, .. } = self;
-        let mut cx = Ctx { now, ob, ev: events, rng };
+        let Node {
+            phase,
+            ob,
+            events,
+            rng,
+            ..
+        } = self;
+        let mut cx = Ctx {
+            now,
+            ob,
+            ev: events,
+            rng,
+        };
         let mut flow = Flow::Continue;
         let mut joined: Option<Box<Game>> = None;
         let mut join_failed: Option<String> = None;
@@ -1443,21 +1746,43 @@ impl Node {
         self.after_call();
     }
 
-    fn on_announcement(&mut self, now: Instant, from: SocketAddrV4, via_multicast: bool, games: &[Announcement]) {
+    fn on_announcement(
+        &mut self,
+        now: Instant,
+        from: SocketAddrV4,
+        via_multicast: bool,
+        games: &[Announcement],
+    ) {
         // Multicast всегда считается локальной сетью; unicast с адреса сервера — сервером курса.
-        let source = if !via_multicast && Some(from) == self.server { Source::Server } else { Source::Lan };
+        let source = if !via_multicast && Some(from) == self.server {
+            Source::Server
+        } else {
+            Source::Lan
+        };
         self.catalog.ingest(now, from, games, source);
 
-        let Node { phase, ob, events, rng, .. } = self;
-        let mut cx = Ctx { now, ob, ev: events, rng };
+        let Node {
+            phase,
+            ob,
+            events,
+            rng,
+            ..
+        } = self;
+        let mut cx = Ctx {
+            now,
+            ob,
+            ev: events,
+            rng,
+        };
         let mut step = JoinStep::Wait;
-        if let Phase::Joining(j) = phase {
-            if from == j.key.addr {
-                if let Some(g) = games.iter().find(|g| g.game_name == j.key.name && g.config.is_valid()) {
-                    j.cfg = Some(g.config);
-                    step = j.try_complete(&mut cx);
-                }
-            }
+        if let Phase::Joining(j) = phase
+            && from == j.key.addr
+            && let Some(g) = games
+                .iter()
+                .find(|g| g.game_name == j.key.name && g.config.is_valid())
+        {
+            j.cfg = Some(g.config);
+            step = j.try_complete(&mut cx);
         }
         match step {
             JoinStep::Wait => {}
@@ -1476,21 +1801,34 @@ impl Node {
         self.now = now;
         self.catalog.expire(now);
 
-        let Node { phase, ob, events, rng, last_discover, server, .. } = self;
-        let mut cx = Ctx { now, ob, ev: events, rng };
+        let Node {
+            phase,
+            ob,
+            events,
+            rng,
+            last_discover,
+            server,
+            ..
+        } = self;
+        let mut cx = Ctx {
+            now,
+            ob,
+            ev: events,
+            rng,
+        };
         let mut flow = Flow::Continue;
         let mut joined: Option<Box<Game>> = None;
         let mut join_failed: Option<String> = None;
         match phase {
-            Phase::Lobby => {
-                if let Some(srv) = *server {
-                    if last_discover.is_none_or(|t| now.duration_since(t) >= DISCOVER_PERIOD) {
-                        let m = mk(cx.ob.seq(), None, None, None, Body::Discover);
-                        cx.ob.unicast(srv, &m);
-                        *last_discover = Some(now);
-                    }
-                }
+            Phase::Lobby
+                if let Some(srv) = *server
+                    && last_discover.is_none_or(|t| now.duration_since(t) >= DISCOVER_PERIOD) =>
+            {
+                let m = mk(cx.ob.seq(), None, None, None, Body::Discover);
+                cx.ob.unicast(srv, &m);
+                *last_discover = Some(now);
             }
+            Phase::Lobby => {}
             Phase::Joining(j) => match j.tick(&mut cx) {
                 JoinStep::Wait => {}
                 JoinStep::Done(g) => joined = Some(g),
@@ -1546,7 +1884,8 @@ impl Node {
     fn after_call(&mut self) {
         if let Some(why) = self.ob.fault.take() {
             self.phase = Phase::Lobby;
-            self.events.push(Event::Failure(format!("Внутренняя ошибка: {why}")));
+            self.events
+                .push(Event::Failure(format!("Внутренняя ошибка: {why}")));
         }
         if self.quitting && matches!(self.phase, Phase::Lobby) && self.closing.is_empty() {
             self.quitting = false;

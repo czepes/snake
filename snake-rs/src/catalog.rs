@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::net::SocketAddrV4;
 use std::time::{Duration, Instant};
 
-use crate::wire::{Announcement, Config, MAX_PLAYERS, MAX_SNAKES, PlayerInfo, PlayerStatus, valid_game_name};
+use crate::wire::{
+    Announcement, Config, MAX_PLAYERS, MAX_SNAKES, PlayerInfo, PlayerStatus, valid_game_name,
+};
 
 /// Сколько запись живёт без новых анонсов.
 pub const ENTRY_TTL: Duration = Duration::from_millis(3000);
@@ -40,15 +42,20 @@ impl Entry {
     }
 
     pub fn snakes(&self) -> usize {
-        self.players.iter().filter(|p| p.status == PlayerStatus::Playing).count()
+        self.players
+            .iter()
+            .filter(|p| p.status == PlayerStatus::Playing)
+            .count()
     }
 
     pub fn from_lan(&self, now: Instant) -> bool {
-        self.lan_seen.is_some_and(|t| now.duration_since(t) <= ENTRY_TTL)
+        self.lan_seen
+            .is_some_and(|t| now.duration_since(t) <= ENTRY_TTL)
     }
 
     pub fn from_server(&self, now: Instant) -> bool {
-        self.server_seen.is_some_and(|t| now.duration_since(t) <= ENTRY_TTL)
+        self.server_seen
+            .is_some_and(|t| now.duration_since(t) <= ENTRY_TTL)
     }
 
     /// Можно ли присоединиться наблюдателем.
@@ -74,9 +81,18 @@ impl Catalog {
 
     /// Учитывает анонсы от `from`. Некорректные игры пропускаются по одной,
     /// не отвергая сообщение целиком.
-    pub fn ingest(&mut self, now: Instant, from: SocketAddrV4, games: &[Announcement], source: Source) {
+    pub fn ingest(
+        &mut self,
+        now: Instant,
+        from: SocketAddrV4,
+        games: &[Announcement],
+        source: Source,
+    ) {
         for g in games {
-            if !valid_game_name(&g.game_name) || !g.config.is_valid() || g.players.len() > MAX_PLAYERS {
+            if !valid_game_name(&g.game_name)
+                || !g.config.is_valid()
+                || g.players.len() > MAX_PLAYERS
+            {
                 continue;
             }
             let key = GameKey {
@@ -104,7 +120,8 @@ impl Catalog {
     }
 
     pub fn expire(&mut self, now: Instant) {
-        self.entries.retain(|_, e| now.duration_since(e.updated) <= ENTRY_TTL);
+        self.entries
+            .retain(|_, e| now.duration_since(e.updated) <= ENTRY_TTL);
     }
 
     pub fn get(&self, key: &GameKey) -> Option<&Entry> {
@@ -136,7 +153,11 @@ mod tests {
                     name: format!("p{i}"),
                     id: i as i32 + 1,
                     addr: None,
-                    role: if i == 0 { NodeRole::Master } else { NodeRole::Normal },
+                    role: if i == 0 {
+                        NodeRole::Master
+                    } else {
+                        NodeRole::Normal
+                    },
                     ptype: PlayerType::Human,
                     score: 0,
                     status: PlayerStatus::Playing,
@@ -191,8 +212,16 @@ mod tests {
         c.ingest(t, a(1), &[ann("full", 6)], Source::Lan);
         c.ingest(t, a(2), &[ann("four", 4)], Source::Lan);
         let list = c.list();
-        let by_name = |n: &str| list.iter().find(|e| e.key.name == n).copied().expect("игра есть в каталоге");
+        let by_name = |n: &str| {
+            list.iter()
+                .find(|e| e.key.name == n)
+                .copied()
+                .expect("игра есть в каталоге")
+        };
         assert!(!by_name("full").can_watch(), "6 участников: мест нет");
-        assert!(by_name("four").can_watch() && !by_name("four").can_play(), "4 змейки: только наблюдать");
+        assert!(
+            by_name("four").can_watch() && !by_name("four").can_play(),
+            "4 змейки: только наблюдать"
+        );
     }
 }
