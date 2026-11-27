@@ -60,6 +60,7 @@ fn disabled_animations_do_not_track_state_or_change_the_frame() {
                     &view,
                     BoardViewport::new(area, (0, 0), (10, 10), 2),
                     now,
+                    0,
                 );
                 animations.render_transition(f, now);
                 assert_eq!(*f.buffer_mut(), before);
@@ -291,6 +292,7 @@ fn departure_does_not_overwrite_living_snakes_or_food() {
         &view(&world),
         BoardViewport::new(area, (0, 0), (10, 10), 2),
         now,
+        0,
     );
     assert_eq!(buffer, before);
 }
@@ -309,7 +311,7 @@ fn departure_is_clipped_to_visible_cells_and_preserves_border() {
         let viewport = BoardViewport::new(area, (0, 0), (5, 6), cw);
         let mut buffer = Buffer::filled(area, ratatui::buffer::Cell::new("."));
         let before = buffer.clone();
-        state.render_board(&mut buffer, &view(&world), viewport, now);
+        state.render_board(&mut buffer, &view(&world), viewport, now, 0);
         assert_ne!(buffer, before);
         for y in area.top()..area.bottom() {
             for x in area.left()..area.right() {
@@ -323,9 +325,35 @@ fn departure_is_clipped_to_visible_cells_and_preserves_border() {
         }
         let hidden = BoardViewport::new(area, (5, 5), (5, 6), cw);
         let mut buffer = before.clone();
-        state.render_board(&mut buffer, &view(&world), hidden, now);
+        state.render_board(&mut buffer, &view(&world), hidden, now, 0);
         assert_eq!(buffer, before);
         assert_eq!(state.departures.len(), 1);
+    }
+}
+
+#[test]
+fn palette_shift_recolors_departures_without_restarting_effects() {
+    let now = Instant::now();
+    let mut world = world();
+    let mut state = State::default();
+    state.update_board(&view(&world), now);
+    world.snakes.clear();
+    world.foods.clear();
+    state.update_board(&view(&world), now);
+    let area = Rect::new(0, 0, 24, 12);
+    for cw in [1, 2] {
+        let viewport = BoardViewport::new(area, (0, 0), (10, 10), cw);
+        for offset in 0..super::super::PALETTE.len() {
+            let mut buffer = Buffer::empty(area);
+            state.render_board(&mut buffer, &view(&world), viewport, now, offset);
+            let cell = viewport.cell_area((2, 2)).unwrap();
+            assert_eq!(buffer[(cell.x, cell.y)].fg, super::super::PALETTE[offset]);
+            if cw == 2 {
+                assert_eq!(buffer[(cell.x, cell.y)].bg, super::super::PALETTE[offset]);
+            }
+            assert_eq!(state.departures.len(), 1);
+            assert_eq!(state.departures[0].effect.started, now);
+        }
     }
 }
 

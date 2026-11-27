@@ -62,7 +62,8 @@ impl TimedEffect {
 
 struct SnakeSnapshot {
     cells: VecDeque<Cell>,
-    color: Color,
+    /// Индекс без сдвига: даже исчезнувшие змейки следуют текущей палитре.
+    color_index: usize,
 }
 
 struct Departure {
@@ -212,9 +213,10 @@ impl Animations {
         v: &GameView,
         viewport: BoardViewport,
         now: Instant,
+        palette_offset: usize,
     ) {
         let Some(state) = &self.state else { return };
-        state.render_board(f.buffer_mut(), v, viewport, now);
+        state.render_board(f.buffer_mut(), v, viewport, now, palette_offset);
     }
 }
 
@@ -245,7 +247,7 @@ impl State {
                     s.owner,
                     SnakeSnapshot {
                         cells: s.cells.clone(),
-                        color: super::player_color(v, s.owner),
+                        color_index: super::player_color_index(v, s.owner),
                     },
                 )
             })
@@ -309,7 +311,14 @@ impl State {
         self.foods = foods;
     }
 
-    fn render_board(&self, buf: &mut Buffer, v: &GameView, viewport: BoardViewport, now: Instant) {
+    fn render_board(
+        &self,
+        buf: &mut Buffer,
+        v: &GameView,
+        viewport: BoardViewport,
+        now: Instant,
+        palette_offset: usize,
+    ) {
         let occupied: HashSet<_> = v
             .world
             .snakes
@@ -333,7 +342,8 @@ impl State {
                 if area.is_empty() {
                     continue;
                 }
-                let color = departure.snake.color;
+                let color = super::PALETTE
+                    [(departure.snake.color_index + palette_offset) % super::PALETTE.len()];
                 for x in area.left()..area.right() {
                     buf[(x, area.y)]
                         .set_symbol(if viewport.cell_width == 2 { " " } else { "█" })

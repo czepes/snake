@@ -21,6 +21,9 @@ use ratatui::widgets::{Block, Cell as TCell, Clear, Paragraph, Row, Table, Wrap}
 
 mod animations;
 
+#[cfg(test)]
+mod tests;
+
 use animations::{Animations, BoardViewport};
 
 use crate::node::{Command, Event, GameView, Node, PhaseKind};
@@ -88,6 +91,8 @@ pub struct Ui {
     form: CreateForm,
     name_buf: String,
     msg: Option<Msg>,
+    /// Общий локальный сдвиг сохраняет различие цветов участников.
+    palette_offset: usize,
     animations: Animations,
 }
 
@@ -106,6 +111,7 @@ impl Ui {
             form,
             name_buf: String::new(),
             msg: None,
+            palette_offset: 0,
             animations: Animations::new(enabled),
         }
     }
@@ -175,6 +181,7 @@ impl Ui {
             return;
         }
         match key.code {
+            KeyCode::Tab => self.palette_offset = (self.palette_offset + 1) % PALETTE.len(),
             KeyCode::Char('v' | 'V' | 'м' | 'М') => node.command(now, Command::ToggleWatch),
             KeyCode::Char('r' | 'R' | 'к' | 'К') => node.command(now, Command::InviteRobot),
             KeyCode::Esc | KeyCode::Char('q' | 'Q' | 'й' | 'Й') => {
@@ -769,13 +776,17 @@ impl Ui {
                     .to_owned()
             }
         };
-        let mut footer = vec![Line::from(state_line)];
+        let mut palette_help = vec![Span::styled(
+            "[Tab] сменить цвета",
+            Style::new().fg(Color::DarkGray),
+        )];
         if v.role == NodeRole::Master {
-            footer.push(Line::from(Span::styled(
-                "[R] пригласить робота с сервера курса",
+            palette_help.push(Span::styled(
+                "   [R] пригласить робота с сервера курса",
                 Style::new().fg(Color::DarkGray),
-            )));
+            ));
         }
+        let footer = vec![Line::from(state_line), Line::from(palette_help)];
         let foot = Layout::vertical([
             Constraint::Length(footer.len() as u16),
             Constraint::Length(1),
@@ -801,7 +812,7 @@ impl Ui {
 
         let mut occ: HashMap<(i32, i32), (Color, bool)> = HashMap::new();
         for s in &v.world.snakes {
-            let color = player_color(v, s.owner);
+            let color = player_color(v, s.owner, self.palette_offset);
             for (i, &c) in s.cells.iter().enumerate() {
                 occ.insert(c, (color, i == 0));
             }
@@ -851,8 +862,13 @@ impl Ui {
             area,
         );
 
-        self.animations
-            .render_board(f, v, BoardViewport::new(area, (ox, oy), (vw, vh), cw), now);
+        self.animations.render_board(
+            f,
+            v,
+            BoardViewport::new(area, (ox, oy), (vw, vh), cw),
+            now,
+            self.palette_offset,
+        );
     }
 
     fn draw_side(&self, f: &mut Frame, v: &GameView, area: Rect) {
@@ -870,7 +886,7 @@ impl Ui {
             .iter()
             .map(|p| {
                 let has_snake = v.world.snake(p.id).is_some();
-                let color = player_color(v, p.id);
+                let color = player_color(v, p.id, self.palette_offset);
                 let swatch = Span::styled(
                     "■ ",
                     Style::new().fg(if has_snake { color } else { Color::DarkGray }),
@@ -933,9 +949,12 @@ impl Ui {
     }
 }
 
-fn player_color(v: &GameView, id: i32) -> Color {
-    let index = v.players.iter().filter(|p| p.id < id).count();
-    PALETTE[index % PALETTE.len()]
+fn player_color_index(v: &GameView, id: i32) -> usize {
+    v.players.iter().filter(|p| p.id < id).count()
+}
+
+fn player_color(v: &GameView, id: i32, palette_offset: usize) -> Color {
+    PALETTE[(player_color_index(v, id) + palette_offset) % PALETTE.len()]
 }
 
 /// Размеры видимой части поля: ширина клетки (1 или 2 столбца), клеток по ширине и высоте.
