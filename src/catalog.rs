@@ -1,6 +1,10 @@
 //! Каталог найденных игр. Игра определяется парой (имя, endpoint отправителя
 //! анонса); одна и та же игра, пришедшая и из локальной сети, и от сервера
 //! курса, показывается одной строкой.
+//!
+//! Анонс обновляет только перечисленные в нём игры: сервер может прислать каталог
+//! несколькими пакетами. У каждой записи свой TTL, а отметки источников хранятся
+//! отдельно, чтобы интерфейс мог показать, откуда игра была недавно видна.
 
 use std::collections::HashMap;
 use std::net::SocketAddrV4;
@@ -19,12 +23,14 @@ pub enum Source {
     Server,
 }
 
+/// Ключ игры: одноимённые игры разных MASTER не объединяются.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct GameKey {
     pub name: String,
     pub addr: SocketAddrV4,
 }
 
+/// Последние параметры игры и независимые отметки получения из двух источников.
 #[derive(Clone, Debug)]
 pub struct Entry {
     pub key: GameKey,
@@ -119,6 +125,7 @@ impl Catalog {
         }
     }
 
+    /// Удаляет только записи, не обновлявшиеся ни из одного источника в течение TTL.
     pub fn expire(&mut self, now: Instant) {
         self.entries
             .retain(|_, e| now.duration_since(e.updated) <= ENTRY_TTL);

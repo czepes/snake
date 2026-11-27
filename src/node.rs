@@ -2,8 +2,21 @@
 //! состояния, смена MASTER и выход из игры.
 //!
 //! Ядро «чистое»: входящие датаграммы подаются в `on_datagram`, время — в
-//! `on_tick`/`command`, исходящее забирается из `drain_out`. Сокетов и часов
+//! `on_tick`/`command`, исходящее забирается из `drain_out`. Сокетов и чтения часов
 //! здесь нет, поэтому весь протокол проверяется в симуляторе сети.
+//!
+//! # Как читать модуль
+//!
+//! [`Node`] владеет каталогом, общей очередью отправки и одной из фаз:
+//! `Lobby → Joining → InGame → Lobby`. `Joining` отдельно собирает ACK на Join,
+//! конфигурацию из анонса и первый снимок: UDP не гарантирует порядок их прихода.
+//! `Game` хранит уже начатую сессию; методы `m_*` обслуживают MASTER,
+//! а `p_*` — участника, следующего за ним (NORMAL или DEPUTY).
+//!
+//! Два порядка нельзя смешивать: `msg_seq` относится к доставке сообщений и
+//! новизне команд, `state_order` — к версии мира. Например, запоздалый State
+//! можно подтвердить, не применяя его. Сетевую доставку ведёт [`Reliable`],
+//! движение рассчитывает [`World`], а этот модуль связывает их с ролями и статусами.
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -23,6 +36,7 @@ pub const LEAVE_DEADLINE: Duration = Duration::from_millis(1000);
 
 // ───────────────────────────── Публичный интерфейс ───────────────────────────
 
+/// Действие пользователя; узел сам решает, допустимо ли оно в текущей фазе.
 #[derive(Clone, Debug)]
 pub enum Command {
     /// Создать игру, ведущим которой станет этот узел.
@@ -52,6 +66,7 @@ pub enum Command {
     Quit,
 }
 
+/// Уведомление для интерфейса; оно не заменяет чтение актуального [`GameView`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     /// Информационное сообщение для строки состояния.
@@ -72,6 +87,10 @@ pub enum PhaseKind {
     InGame,
 }
 
+/// Заимствованное представление сессии для TUI без доступа к изменению мира.
+///
+/// `role` задаёт сетевые обязанности, `status` — участие в игре. `status_pending`
+/// отражает ожидание ответа на запрос, а фактический статус берётся из состояния.
 pub struct GameView<'a> {
     pub name: &'a str,
     pub cfg: Config,
@@ -96,6 +115,8 @@ pub struct JoiningView<'a> {
 
 // ─────────────────────────────── Внутренние типы ─────────────────────────────
 
+/// Временные зависимости одного вызова: время, исходящие пакеты, события и RNG.
+/// Отдельный контекст позволяет менять фазу, не передавая ей весь `Node`.
 struct Ctx<'a> {
     now: Instant,
     ob: &'a mut Outbox,
@@ -109,6 +130,7 @@ impl Ctx<'_> {
     }
 }
 
+/// Результат обработки внутри игры; переход в лобби выполняет `Node::finish_flow`.
 enum Flow {
     Continue,
     /// Игра закончилась по внешней причине.
@@ -133,20 +155,26 @@ enum Phase {
     InGame(Box<Game>),
 }
 
+/// Передача управления при выходе MASTER с общим дедлайном на обе стадии.
 struct Leaving {
+    /// 1 — ждём ACK на State, 2 — на RoleChange, 3 — можно закрывать сессию.
     stage: u8,
     deadline: Instant,
     to: SocketAddrV4,
     wait_seq: i64,
 }
 
+/// Данные, используемые только ведущим; при повышении DEPUTY создаются заново.
 struct MasterState {
     next_tick: Instant,
     next_announce: Instant,
     /// Последняя допустимая команда курса на текущий ход: (msg_seq, направление).
     steers: HashMap<i32, (i64, Dir)>,
+    /// Номера команд сохраняются между ходами, в отличие от очищаемого `steers`.
     steer_seq: HashMap<i32, i64>,
+    /// Независимый порядок запросов статуса, не связанный с порядком поворотов.
     status_seq: HashMap<i32, i64>,
+    /// Назначенный DEPUTY, которому следующая публикация пошлёт RoleChange.
     deputy_notice: Option<i32>,
 }
 
@@ -163,6 +191,8 @@ impl MasterState {
     }
 }
 
+/// Общая копия сессии; у MASTER она авторитетна, у остальных обновляется из State.
+/// DEPUTY хранит те же данные, включая `next_id`, чтобы продолжить игру при отказе.
 struct Game {
     name: String,
     my_id: i32,
@@ -181,15 +211,20 @@ struct Game {
     leaving: Option<Leaving>,
 }
 
+/// Независимо собирает подтверждение регистрации, конфиг и самый новый State.
+/// Отсутствие конфига не мешает подтверждать пакеты и повторять Join.
 struct Joining {
     key: GameKey,
+    /// Начало всей попытки: повторные пакеты не продлевают дедлайн.
     started: Instant,
     join_seq: i64,
     cfg: Option<Config>,
     acked: bool,
     my_id: Option<i32>,
+    /// Предварительный ID из State, если тот обогнал ACK на Join.
     early_id: Option<i32>,
     master_id: Option<i32>,
+    /// Единственный снимок с максимальным order и его receiver_id.
     buffered: Option<(StateMsg, Option<i32>)>,
     last_discover: Instant,
     rel: Reliable,
@@ -219,7 +254,9 @@ fn mk(
 
 /// Принимает входящий запрос с подтверждением: проверяет окно дедупликации,
 /// повторяет сохранённый ответ на дубликат и отправляет ACK на новый запрос.
-/// Возвращает `true`, если запрос нужно обработать.
+/// Возвращает `true`, если запрос нужно обработать. Вызывающий уже должен
+/// проверить отправителя и контекст; ACK сюда не передаётся. Для операций,
+/// которые могут завершиться Error вместо ACK, ответ выбирается отдельно.
 fn accept_request(
     rel: &mut Reliable,
     cx: &mut Ctx,
@@ -372,6 +409,8 @@ impl Game {
             .find(|p| p.role == NodeRole::Deputy && p.id != self.my_id)
     }
 
+    /// Собирает снимок, опуская собственный endpoint согласно формату протокола.
+    /// Счётчик `next_id` передаётся даже после выхода игроков: ID не переиспользуются.
     fn build_state(&self) -> StateMsg {
         StateMsg {
             order: self.order,
@@ -408,7 +447,8 @@ impl Game {
 
     // ─────────────────────────── Действия ведущего ───────────────────────────
 
-    /// Публикует новое состояние всем участникам.
+    /// Публикует новое состояние всем участникам, увеличивая `state_order`.
+    /// Публикация между ходами не двигает змеек и не меняет `next_tick`.
     fn publish(&mut self, cx: &mut Ctx) {
         self.order = self.order.saturating_add(1);
         let state = self.build_state();
@@ -456,6 +496,8 @@ impl Game {
         }
     }
 
+    /// Удаляет игрока и исходящую связь, но оставляет окно сохранённых ответов.
+    /// Благодаря этому повтор Leave в пределах окна получает прежний ACK даже после удаления.
     fn remove_player(&mut self, id: i32) {
         if let Some(i) = self.players.iter().position(|p| p.id == id) {
             let p = self.players.remove(i);
@@ -504,12 +546,15 @@ impl Game {
         Ok(true)
     }
 
+    /// Завершает изменение состава/статусов без движения: заместитель, еда, снимок.
     fn after_change(&mut self, cx: &mut Ctx) {
         self.ensure_deputy();
         self.world.refill_food(cx.rng);
         self.publish(cx);
     }
 
+    /// Отказывает в операции: Error имеет собственный seq, но ссылается на req_seq.
+    /// Именно Error сохраняется как ответ на повтор запроса; ACK запроса не нужен.
     fn m_error(
         &mut self,
         cx: &mut Ctx,
@@ -529,6 +574,9 @@ impl Game {
         self.rel.record(to, req_seq, Some(sent));
     }
 
+    /// Допуск endpoint: повтор в пределах окна возвращает прежний ответ,
+    /// новый Join подключённого адреса — имеющийся ID. Новая змейка размещается
+    /// только при допуске нового участника в статусе PLAYING.
     fn m_join(&mut self, cx: &mut Ctx, from: SocketAddrV4, msg: Message) -> Flow {
         match self.rel.classify(from, msg.seq) {
             Seen::TooOld => return Flow::Continue,
@@ -628,6 +676,9 @@ impl Game {
         Flow::Continue
     }
 
+    /// Входящие на MASTER: ACK отдельно, затем Join или запрос участника.
+    /// Окно повторов защищает от повторного исполнения, а `steer_seq`/`status_seq`
+    /// дополнительно не дают запоздалой новой команде отменить более свежую.
     fn m_message(&mut self, cx: &mut Ctx, from: SocketAddrV4, msg: Message) -> Flow {
         match &msg.body {
             Body::Ack => {
@@ -681,6 +732,8 @@ impl Game {
                 let last = self.m.steer_seq.get(&pl.id).copied().unwrap_or(-1);
                 if msg.seq > last {
                     self.m.steer_seq.insert(pl.id, msg.seq);
+                    // Неверный разворот учитывается в порядке сообщений, но не
+                    // стирает последнюю допустимую команду на этот ход.
                     if pl.status == PlayerStatus::Playing && self.world.is_steer_valid(pl.id, dir) {
                         self.m.steers.insert(pl.id, (msg.seq, dir));
                     }
@@ -783,6 +836,8 @@ impl Game {
         }
     }
 
+    /// Сначала обслуживает связь, затем при наступлении срока рассчитывает ход.
+    /// Даже при медленной игре повторы, Ping и удаление недоступных узлов идут чаще ходов.
     fn m_tick(&mut self, cx: &mut Ctx) {
         let dead = self.rel.tick(cx.ob, cx.now, &self.name, Some(self.my_id));
         let mut changed = false;
@@ -848,6 +903,8 @@ impl Game {
     // ───────────────────────── Действия участника ────────────────────────────
 
     /// Применяет снимок состояния. `Err` — участника удалили из игры.
+    /// Некорректный снимок оставляет прежний мир; новизну order проверяет вызывающий.
+    /// Статус берётся из State, а не из ACK на запрос переключения режима.
     fn apply_state(&mut self, cx: &mut Ctx, s: StateMsg) -> Result<(), String> {
         let (world, players, next_id) = match validate_state(self.cfg(), &s) {
             Ok(v) => v,
@@ -876,6 +933,8 @@ impl Game {
         Ok(())
     }
 
+    /// Входящие на NORMAL/DEPUTY: мир принимается только от выбранного MASTER.
+    /// Исключение для другого endpoint — объявление преемника от известного DEPUTY.
     fn p_message(&mut self, cx: &mut Ctx, from: SocketAddrV4, msg: Message) -> Flow {
         let from_master = Some(from) == self.master_addr;
         if !from_master {
@@ -1015,6 +1074,8 @@ impl Game {
         Flow::Continue
     }
 
+    /// Реагирует на подозрение об отказе MASTER: DEPUTY повышается, NORMAL лишь
+    /// переключается на известного заместителя. Повторный тайм-аут завершает сессию.
     fn master_lost(&mut self, cx: &mut Ctx) -> Flow {
         cx.notice("Ведущий не отвечает");
         if self.role == NodeRole::Deputy {
@@ -1038,6 +1099,9 @@ impl Game {
     }
 
     /// Заместитель становится ведущим: при потере связи или по передаче управления.
+    /// Мир, очки и счётчик ID наследуются из последнего снимка; старый MASTER
+    /// удаляется. `graceful_order` задаёт версию первой публикации при штатном выходе.
+    /// Не дошедшие до DEPUTY изменения здесь восстановить невозможно.
     fn become_master(&mut self, cx: &mut Ctx, graceful_order: Option<i32>) -> Flow {
         let old_addr = self.master_addr.take();
         if let Some(old_id) = self.master_id()
@@ -1071,6 +1135,8 @@ impl Game {
             Some(n) if n > self.order => n,
             _ => self.order.saturating_add(1),
         };
+        // publish сам прибавит единицу: первая версия нового MASTER должна
+        // продолжить прежнюю нумерацию, а не начать её заново.
         self.order = next - 1;
         self.ensure_deputy();
 
@@ -1100,6 +1166,8 @@ impl Game {
     // ─────────────────────────────── Выход ───────────────────────────────────
 
     /// Начинает выход. `Left` — игра для узла закончилась сразу.
+    /// Обычный участник оставляет повторы Leave в `closing` и возвращается в лобби;
+    /// MASTER остаётся в сессии до двух ACK передачи управления или дедлайна.
     fn begin_leave(&mut self, cx: &mut Ctx, closing: &mut Vec<Closing>) -> Flow {
         if self.role != NodeRole::Master {
             if let Some(to) = self.master_addr {
@@ -1131,6 +1199,8 @@ impl Game {
             return Flow::Left;
         };
         // Передача управления: актуальный State заместителю, затем смена роли.
+        // Здесь State — Control: его нельзя вытеснить обычной рассылкой снимков,
+        // ведь именно ACK на этот seq разрешает перейти к RoleChange.
         let state = self.build_state();
         let m = self.msg(Some(id), Body::State(state));
         let sent = self.rel.send_request(cx.ob, cx.now, addr, Kind::Control, m);
@@ -1320,6 +1390,9 @@ impl Joining {
         self.try_complete(cx)
     }
 
+    /// Превращает накопленные части подключения в полноценную сессию.
+    /// Переносит, а не пересоздаёт `Reliable`, сохраняя ответы на ранние пакеты
+    /// и ещё не подтверждённые исходящие сообщения.
     fn try_complete(&mut self, cx: &mut Ctx) -> JoinStep {
         if !self.acked || self.cfg.is_none() {
             return JoinStep::Wait;
@@ -1391,6 +1464,11 @@ impl Joining {
 
 // ───────────────────────────────── Узел ──────────────────────────────────────
 
+/// Автомат одного локального узла: каталог, подключение и активная сессия.
+///
+/// Все входы вызываются последовательно с монотонным `now`. После них нужно
+/// забирать исходящие пакеты и события через `drain_*`; собственных потоков,
+/// сокетов или фоновых таймеров у узла нет.
 pub struct Node {
     ob: Outbox,
     events: Vec<Event>,
@@ -1442,10 +1520,13 @@ impl Node {
         self.my_port = port;
     }
 
+    /// Забирает накопленные датаграммы для транспорта, очищая очередь отправки.
+    /// Запросы, ожидающие ACK, остаются в `Reliable` и при необходимости повторятся.
     pub fn drain_out(&mut self) -> Vec<Out> {
         std::mem::take(&mut self.ob.out)
     }
 
+    /// Забирает накопленные уведомления для интерфейса, очищая очередь событий.
     pub fn drain_events(&mut self) -> Vec<Event> {
         std::mem::take(&mut self.events)
     }
@@ -1480,6 +1561,7 @@ impl Node {
             .is_some_and(|t| now.duration_since(t) <= Duration::from_millis(3000))
     }
 
+    /// Читает текущий мир без копирования; вне активной игры возвращает `None`.
     pub fn game_view(&self) -> Option<GameView<'_>> {
         let Phase::InGame(g) = &self.phase else {
             return None;
@@ -1536,6 +1618,8 @@ impl Node {
         self.my_port != 0 && from.port() == self.my_port && self.local_ips.contains(from.ip())
     }
 
+    /// Обрабатывает пользовательское действие без ожидания сетевого ответа.
+    /// Результат отражается в событиях и последующих представлениях состояния.
     pub fn command(&mut self, now: Instant, cmd: Command) {
         self.now = now;
         let Node {
@@ -1651,6 +1735,9 @@ impl Node {
         self.after_call();
     }
 
+    /// Точка входа пакета от транспорта: декодирование, обнаружение игр, затем
+    /// диспетчеризация по фазе. `via_multicast` указывает сокет приёма, не адрес
+    /// отправителя; проверку предельного размера датаграммы выполняет транспорт.
     pub fn on_datagram(
         &mut self,
         now: Instant,
@@ -1797,6 +1884,9 @@ impl Node {
         }
     }
 
+    /// Продвигает таймеры без ожидания: TTL каталога, Discover, повторы, Ping,
+    /// тайм-ауты, игровые ходы и завершение выхода. Вызывается чаще игрового хода,
+    /// иначе медленная игра задерживала бы обслуживание связи.
     pub fn on_tick(&mut self, now: Instant) {
         self.now = now;
         self.catalog.expire(now);

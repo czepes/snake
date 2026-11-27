@@ -4,6 +4,12 @@
 //! 239.192.0.4:9193, второй (порт выбирает ОС) делает всё остальное, включая
 //! отправку multicast-анонсов через каждый интерфейс. Недоступность multicast
 //! или ошибка одного интерфейса не мешают работе: остаются unicast и сервер.
+//!
+//! Оба сокета неблокирующие. [`Net::recv`] передаёт сырые пакеты ядру, а
+//! [`Net::send`] отправляет подготовленные им [`Out`]. Повторов здесь нет:
+//! ошибки UDP-отправки оставляются уровню надёжности, который ждёт ACK.
+//! Один игровой сокет используется и для Discover серверу, и для Join/игры,
+//! чтобы ответы возвращались на тот же endpoint, в том числе за NAT.
 
 use std::collections::HashSet;
 use std::io;
@@ -21,12 +27,15 @@ pub const MULTICAST_PORT: u16 = 9193;
 pub const DEFAULT_SERVER: &str = "snakes.ippolitov.me:9193";
 const REFRESH_PERIOD: Duration = Duration::from_secs(5);
 
+/// Пакет с метаданными приёма; protobuf здесь ещё не разбирается.
 pub struct Datagram {
     pub from: SocketAddrV4,
     pub multicast: bool,
     pub bytes: Vec<u8>,
 }
 
+/// Транспорт с одним игровым endpoint и отдельным сокетом обнаружения LAN.
+/// Отсутствие multicast-сокета не мешает работать с сервером через unicast.
 pub struct Net {
     unicast: UdpSocket,
     mcast: Option<UdpSocket>,
@@ -76,6 +85,8 @@ impl Net {
         self.mcast.is_some() && !self.joined.is_empty()
     }
 
+    /// Пытается вступить в группу на каждом найденном IPv4-интерфейсе.
+    /// Неудачные интерфейсы не запоминаются в `joined`: следующий проход повторит попытку.
     fn rescan(&mut self) {
         let mut ips: Vec<Ipv4Addr> = if_addrs::get_if_addrs()
             .map(|v| {
@@ -111,7 +122,8 @@ impl Net {
         before != self.ifaces
     }
 
-    /// Забирает все накопившиеся датаграммы обоих сокетов.
+    /// Забирает накопившиеся датаграммы обоих сокетов с лимитом на один проход.
+    /// Слишком большие пакеты отбрасываются; ожидания новых пакетов здесь нет.
     pub fn recv(&mut self, mut f: impl FnMut(Datagram)) {
         let mut buf = [0u8; 2048];
         drain(&self.unicast, &mut buf, false, &mut f);
@@ -120,6 +132,8 @@ impl Net {
         }
     }
 
+    /// Делает попытку отправки без ожидания подтверждения. Multicast уходит через
+    /// каждый интерфейс, но всегда из игрового сокета: ответы должны прийти на него.
     pub fn send(&self, out: &Out) {
         match out {
             Out::Unicast(to, bytes) => {

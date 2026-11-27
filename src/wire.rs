@@ -1,9 +1,15 @@
 //! Сообщения протокола v2.
 //!
-//! Проводной формат генерируется `prost` из `src/main/protobuf/snakes.proto`
+//! Проводной формат генерируется `prost` из `protobuf/snakes.proto`
 //! (см. `build.rs`). Доменные типы (`Dir`, `Config`, `PlayerInfo`, `Body`, …)
 //! остаются здесь же: они удобнее для ядра игры, а конверсии в `proto::*`
 //! и обратно сосредоточены в этом модуле.
+//!
+//! [`decode`] проверяет protobuf, версию, номер сообщения и представимость полей
+//! в доменных типах. Это не полная проверка протокола: принадлежность игре,
+//! полномочия отправителя и смысл снимка разбирает [`crate::node`], а размер
+//! входящей датаграммы ограничивает [`crate::net`]. При обратной конверсии
+//! protobuf собирается заново, поэтому неизвестные поля не попадают в исходящие снимки.
 
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::str::FromStr;
@@ -24,6 +30,7 @@ pub const MAX_SNAKES: usize = 4;
 
 // ───────────────────────────── Доменные типы ─────────────────────────────────
 
+/// Сетевая обязанность узла, не зависящая от наличия живой змейки.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeRole {
     Normal,
@@ -31,6 +38,7 @@ pub enum NodeRole {
     Deputy,
 }
 
+/// Участие в игре: управлять змейкой или наблюдать, сохраняя сетевую роль.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlayerStatus {
     Playing,
@@ -71,10 +79,12 @@ impl Dir {
     }
 }
 
+/// Участник сессии: ID, endpoint, роль, статус и накопленные очки.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlayerInfo {
     pub name: String,
     pub id: i32,
+    /// В сообщении отправитель опускает свой endpoint: его даёт UDP-пакет.
     pub addr: Option<SocketAddrV4>,
     pub role: NodeRole,
     pub ptype: PlayerType,
@@ -82,6 +92,7 @@ pub struct PlayerInfo {
     pub status: PlayerStatus,
 }
 
+/// Неизменяемые параметры сессии; значения по умолчанию совпадают со схемой.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Config {
     pub width: i32,
@@ -102,6 +113,7 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Проверяет диапазоны из задания; protobuf сам их не ограничивает.
     pub fn is_valid(&self) -> bool {
         (10..=100).contains(&self.width)
             && (10..=100).contains(&self.height)
@@ -110,6 +122,8 @@ impl Config {
     }
 }
 
+/// Компактное тело змейки: абсолютная голова, затем относительные осевые отрезки.
+/// Смещения описывают реальный путь тела, даже если он несколько раз пересекает край.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WireSnake {
     pub player_id: i32,
@@ -117,12 +131,15 @@ pub struct WireSnake {
     pub dir: Dir,
 }
 
+/// Полный снимок мира от MASTER, а не набор изменений с прошлого хода.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StateMsg {
+    /// Версия игрового состояния, независимая от номера UDP-сообщения.
     pub order: i32,
     pub snakes: Vec<WireSnake>,
     pub foods: Vec<(i32, i32)>,
     pub players: Vec<PlayerInfo>,
+    /// Следующий ещё не выданный ID; наследуется при смене MASTER.
     pub next_player_id: i32,
 }
 
@@ -183,8 +200,10 @@ impl Body {
     }
 }
 
+/// Оболочка одной датаграммы; `protocol_version` добавляется при кодировании.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Message {
+    /// Номер сообщения отправителя; у ACK копирует номер подтверждаемого запроса.
     pub seq: i64,
     pub sender_id: Option<i32>,
     pub receiver_id: Option<i32>,
@@ -309,6 +328,8 @@ impl Message {
     }
 }
 
+/// Кодирует ровно один GameMessage без обрамления и проверяет итоговый размер.
+/// Слишком большое сообщение возвращается как ошибка, а не обрезается.
 pub fn encode(m: &Message) -> Result<Vec<u8>, EncodeError> {
     let p = m.to_proto();
     let mut buf = Vec::with_capacity(128);
@@ -320,6 +341,8 @@ pub fn encode(m: &Message) -> Result<Vec<u8>, EncodeError> {
     Ok(buf)
 }
 
+/// Разбирает protobuf v2 в доменные типы; не проверяет игровую сессию и полномочия.
+/// Лимит размера входящего пакета проверяется транспортом до вызова этой функции.
 pub fn decode(bytes: &[u8]) -> Result<Message, DecodeError> {
     let p = proto::GameMessage::decode(bytes).map_err(|_| DecodeError("protobuf decode"))?;
     if p.protocol_version != PROTOCOL_VERSION {
@@ -561,6 +584,7 @@ pub fn valid_game_name(s: &str) -> bool {
     !s.trim().is_empty() && s.len() <= MAX_GAME_NAME && !s.chars().any(char::is_control)
 }
 
+/// Обрезает по лимиту байт, отступая к границе UTF-8, а не разрывая символ.
 pub fn truncate_bytes(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_owned();

@@ -1,5 +1,11 @@
 //! Сценарные тесты протокола в симуляторе сети: потери, дубли, перестановки,
 //! «смерть» узлов, смена ведущего. Время виртуальное, сокетов нет.
+//!
+//! `cmd` подаёт действие узлу, `pump_outputs` заменяет транспорт, а `step`
+//! двигает часы, вызывает таймеры и доставляет созревшие пакеты. Seed задаёт
+//! генератор для потерь, дублей и задержек; ожидания по реальным часам здесь нет.
+//! Для журнала обмена можно запустить
+//! `SIM_TRACE=1 cargo test --test sim -- --nocapture`.
 
 use std::collections::HashSet;
 use std::net::{Ipv4Addr, SocketAddrV4};
@@ -38,6 +44,7 @@ struct SimNode {
     events: Vec<Event>,
 }
 
+/// Модель сети вокруг настоящих `Node`: меняет доставку, но не игровые правила.
 struct Sim {
     t0: Instant,
     now: Instant,
@@ -87,6 +94,7 @@ impl Sim {
         p > 0.0 && (self.rng.next_u64() % 10_000) as f64 / 10_000.0 < p
     }
 
+    /// Задаёт потерю и число копий; независимый jitter копий допускает перестановку.
     fn schedule(&mut self, to: usize, from: SocketAddrV4, mc: bool, bytes: Vec<u8>) {
         if self.chance(self.loss) {
             return;

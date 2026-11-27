@@ -1,3 +1,6 @@
+//! Генерация protobuf-типов. `src/snakes.v2.rs` — результат работы prost,
+//! а ручные доменные типы и конверсии находятся в `src/wire.rs`.
+
 const PROTOBUF: &str = "./protobuf";
 const SNAKES_PROTO: &str = "./protobuf/snakes.proto";
 

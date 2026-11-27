@@ -1,4 +1,10 @@
 //! Необязательные эффекты поверх готового кадра; игровое состояние не изменяется.
+//!
+//! События для анимаций выводятся из разницы двух наблюдаемых снимков: новая еда,
+//! появившаяся/исчезнувшая змейка, рост или вход головы в прежнюю еду. Это только
+//! визуальная интерпретация, а не журнал всех ходов: между кадрами могли прийти
+//! несколько State. Эффекты привязаны к абсолютному времени старта, поэтому
+//! частота кадров и обрезка поля не меняют их длительность.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -22,6 +28,7 @@ const TRANSITION_MS: u32 = 280;
 const SEGMENT_DELAY_MS: u64 = 30;
 const PULSE_MS: u32 = 240;
 
+/// Шаблон эффекта и его абсолютная временная шкала: рендер не накапливает dt.
 struct TimedEffect {
     effect: Effect,
     started: Instant,
@@ -89,6 +96,8 @@ impl EatWave {
     }
 }
 
+/// Проекция координат мира в буфер терминала, общая с обычной отрисовкой поля.
+/// Учитывает рамку, начало видимого окна и ширину клетки в столбцах терминала.
 #[derive(Clone, Copy)]
 pub(super) struct BoardViewport {
     area: Rect,
@@ -143,6 +152,7 @@ struct State {
     eat_waves: HashMap<i32, EatWave>,
 }
 
+/// При отключённых анимациях состояние вообще не создаётся и кадр не меняется.
 pub(super) struct Animations {
     state: Option<State>,
 }
@@ -209,6 +219,8 @@ impl Animations {
 }
 
 impl State {
+    /// Сравнивает наблюдаемые снимки и удаляет завершённые эффекты. Исчезнувшие
+    /// змейки ненадолго сохраняются отдельно для затухания уже удалённого тела.
     fn update_board(&mut self, v: &GameView, now: Instant) {
         let foods: HashSet<_> = v.world.foods.iter().copied().collect();
         self.food_effects
@@ -247,6 +259,8 @@ impl State {
         for (&owner, snake) in &snakes {
             if let Some(previous) = self.snakes.get(&owner) {
                 let grew = snake.cells.len() > previous.cells.len();
+                // При длине 32 еда не увеличивает тело, поэтому одного grew
+                // недостаточно: проверяем также голову на месте прежней еды.
                 let ate = snake.cells.front() != previous.cells.front()
                     && snake
                         .cells
@@ -308,6 +322,7 @@ impl State {
                 continue;
             }
             for &cell in &departure.snake.cells {
+                // След исчезнувшей змейки не перекрывает новую еду и живые тела.
                 if occupied.contains(&cell) {
                     continue;
                 }

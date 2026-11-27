@@ -2,6 +2,12 @@
 //!
 //! Интерфейс только читает состояние узла и отдаёт ему команды; сетевой логики
 //! здесь нет. Любая причина отказа показывается на экране.
+//!
+//! Фаза [`Node`] выбирает основной экран (лобби, подключение, игра); локальный
+//! `Screen` нужен только для форм внутри лобби. Ввод проходит через [`Ui::on_key`],
+//! уведомления ядра — через [`Ui::on_event`], кадр собирает [`Ui::draw`].
+//! Отрисовка читает [`GameView`], а не изменяет мир; анимации накладываются
+//! на готовый буфер и не влияют на сетевые таймеры или правила.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -71,8 +77,11 @@ impl CreateForm {
     }
 }
 
+/// Локальное состояние TUI: формы, выбор строки, уведомления и визуальные эффекты.
+/// Сам мир хранится в `Node`; интерфейс не поддерживает его отдельную игровую копию.
 pub struct Ui {
     pub player_name: String,
+    /// Выставляется по Event::Exited, когда узел закончил сетевое завершение работы.
     pub quit: bool,
     screen: Screen,
     selected: usize,
@@ -110,6 +119,8 @@ impl Ui {
         });
     }
 
+    /// Превращает событие узла в уведомление или сигнал завершения программы.
+    /// Сообщение GameOver не затирает ещё видимую ошибку с причиной завершения.
     pub fn on_event(&mut self, ev: Event, now: Instant) {
         match ev {
             Event::Notice(s) => self.say(now, s, false),
@@ -126,6 +137,8 @@ impl Ui {
 
     // ───────────────────────────── Ввод ──────────────────────────────────────
 
+    /// Маршрутизирует клавишу по фазе узла; формы обрабатываются только в лобби.
+    /// Ctrl+C запрашивает штатный выход, а не прерывает процесс посреди передачи роли.
     pub fn on_key(&mut self, key: KeyEvent, node: &mut Node, now: Instant) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
             node.command(now, Command::Quit);
@@ -413,6 +426,9 @@ impl Ui {
         true
     }
 
+    /// Собирает кадр из текущего состояния, затем накладывает эффекты.
+    /// Анимации обновляются даже при слишком маленьком окне, чтобы изменение
+    /// размера терминала не создавало заново уже начавшиеся эффекты.
     pub fn draw(&mut self, f: &mut Frame, node: &Node, now: Instant, lan_ok: bool) {
         if self.msg.as_ref().is_some_and(|m| m.until <= now) {
             self.msg = None;
@@ -773,6 +789,8 @@ impl Ui {
         let (w, h) = (v.cfg.width as usize, v.cfg.height as usize);
         let (cw, vw, vh) = board_dims(&v.cfg, area.width as usize, area.height as usize);
 
+        // Если поле не помещается, окно следит за своей головой. Наблюдателю
+        // показываем первую живую змейку, а на пустом поле — центр.
         let focus = v
             .world
             .snake(v.my_id)
