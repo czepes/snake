@@ -13,7 +13,7 @@ use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Margin, Rect};
 use ratatui::style::{Color, Style};
-use tachyonfx::{Effect, Interpolation, Motion, fx};
+use tachyonfx::{CellFilter, Effect, Interpolation, Motion, fx};
 
 use crate::node::{GameView, PhaseKind};
 use crate::rules::Cell;
@@ -69,6 +69,66 @@ struct SnakeSnapshot {
 struct Departure {
     snake: SnakeSnapshot,
     effect: TimedEffect,
+}
+
+impl Departure {
+    fn render_explosion(
+        &self,
+        buf: &mut Buffer,
+        viewport: BoardViewport,
+        now: Instant,
+        palette_offset: usize,
+        occupied: &HashSet<Cell>,
+    ) {
+        let inner = viewport.area.inner(Margin::new(1, 1));
+        let visible = Rect::new(
+            inner.x,
+            inner.y,
+            inner
+                .width
+                .min((viewport.size.0 * viewport.cell_width) as u16),
+            inner.height.min(viewport.size.1 as u16),
+        )
+        .intersection(buf.area);
+        if visible.is_empty() {
+            return;
+        }
+        // explode перемещает частицы за пределы исходного тела. Отдельный слой
+        // ограничивает их полем и не даёт эффекту стирать еду или живых змеек.
+        let mut layer = Buffer::empty(visible);
+        let mut source: Option<Rect> = None;
+        let color =
+            super::PALETTE[(self.snake.color_index + palette_offset) % super::PALETTE.len()];
+        for &cell in &self.snake.cells {
+            let Some(area) = viewport.cell_area(cell) else {
+                continue;
+            };
+            let area = area.intersection(visible);
+            if area.is_empty() {
+                continue;
+            }
+            source = Some(source.map_or(area, |source| source.union(area)));
+            for x in area.left()..area.right() {
+                layer[(x, area.y)].set_symbol("█").set_fg(color);
+            }
+        }
+        let Some(source) = source else { return };
+        self.effect.render(&mut layer, source, now);
+        for y in visible.top()..visible.bottom() {
+            for x in visible.left()..visible.right() {
+                let cell = (
+                    (viewport.origin.0 + usize::from(x - inner.x) / viewport.cell_width) as i32,
+                    (viewport.origin.1 + usize::from(y - inner.y)) as i32,
+                );
+                let particle = &layer[(x, y)];
+                if particle.symbol() != " " && !occupied.contains(&cell) {
+                    buf[(x, y)]
+                        .set_symbol(particle.symbol())
+                        .set_fg(particle.fg);
+                }
+            }
+        }
+    }
 }
 
 struct EatWave {
@@ -143,6 +203,7 @@ impl BoardViewport {
 
 #[derive(Default)]
 struct State {
+    boom: bool,
     phase: Option<PhaseKind>,
     transition: Option<TimedEffect>,
     foods: HashSet<Cell>,
@@ -165,11 +226,18 @@ impl Animations {
         }
     }
 
+    pub(super) fn set_boom(&mut self, enabled: bool) {
+        if let Some(state) = &mut self.state {
+            state.boom = enabled;
+        }
+    }
+
     pub(super) fn update(&mut self, phase: PhaseKind, view: Option<&GameView>, now: Instant) {
         let Some(state) = &mut self.state else { return };
         if state.phase != Some(phase) {
             let previous = state.phase;
             *state = State {
+                boom: state.boom,
                 phase: Some(phase),
                 ..State::default()
             };
@@ -222,7 +290,7 @@ impl Animations {
 
 impl State {
     /// Сравнивает наблюдаемые снимки и удаляет завершённые эффекты. Исчезнувшие
-    /// змейки ненадолго сохраняются отдельно для затухания уже удалённого тела.
+    /// змейки ненадолго сохраняются отдельно для анимации ухода уже удалённого тела.
     fn update_board(&mut self, v: &GameView, now: Instant) {
         let foods: HashSet<_> = v.world.foods.iter().copied().collect();
         self.food_effects
@@ -297,11 +365,16 @@ impl State {
                 self.departures.push(Departure {
                     snake,
                     effect: TimedEffect::new(
-                        fx::fade_to(
-                            Color::DarkGray,
-                            Color::Black,
-                            (DEPARTURE_MS, Interpolation::QuadIn),
-                        ),
+                        if self.boom {
+                            fx::explode(8.0, 1.5, (DEPARTURE_MS, Interpolation::QuadOut))
+                                .with_filter(CellFilter::NonEmpty)
+                        } else {
+                            fx::fade_to(
+                                Color::DarkGray,
+                                Color::Black,
+                                (DEPARTURE_MS, Interpolation::QuadIn),
+                            )
+                        },
                         now,
                         DEPARTURE_MS,
                     ),
@@ -328,6 +401,10 @@ impl State {
             .collect();
         for departure in &self.departures {
             if !departure.effect.running(now) {
+                continue;
+            }
+            if self.boom {
+                departure.render_explosion(buf, viewport, now, palette_offset, &occupied);
                 continue;
             }
             for &cell in &departure.snake.cells {

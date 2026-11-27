@@ -38,6 +38,7 @@ struct Args {
     server: Option<String>,
     multicast: bool,
     animations: bool,
+    boom: bool,
     port: Option<u16>,
     name: String,
     log: Option<String>,
@@ -54,6 +55,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Option<Args
         server: Some(DEFAULT_SERVER.to_owned()),
         multicast: true,
         animations: true,
+        boom: false,
         port: None,
         name: std::env::var("SNAKE_NAME")
             .or_else(|_| std::env::var("USER"))
@@ -71,6 +73,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Option<Args
             "--no-server" => a.server = None,
             "--no-multicast" => a.multicast = false,
             "--no-animations" => a.animations = false,
+            "--boom" => a.boom = true,
             "--server" => a.server = Some(value("host:port")?),
             "--name" => a.name = value("имя")?,
             "--log" => a.log = Some(value("файл")?),
@@ -133,7 +136,8 @@ fn main() -> ExitCode {
     node.set_trace(log.is_some());
 
     let resolver = args.server.clone().map(spawn_resolver);
-    let mut ui = Ui::with_animations(args.name.trim().to_owned(), args.animations);
+    let mut ui =
+        Ui::with_animations(args.name.trim().to_owned(), args.animations).with_boom(args.boom);
 
     let mut terminal = ratatui::init();
     let mut last_draw = start - Duration::from_secs(1);
@@ -222,6 +226,25 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boom_is_opt_in_and_hidden_from_help() {
+        assert!(!parse_args_from(Vec::new()).unwrap().unwrap().boom);
+        let args = parse_args_from(["--boom"].map(str::to_owned))
+            .unwrap()
+            .unwrap();
+        assert!(args.boom && args.animations);
+        assert!(!HELP.contains("--boom"));
+    }
+
+    #[test]
+    fn no_animations_takes_priority_over_boom_regardless_of_order() {
+        for flags in [["--boom", "--no-animations"], ["--no-animations", "--boom"]] {
+            let args = parse_args_from(flags.map(str::to_owned)).unwrap().unwrap();
+            assert!(args.boom);
+            assert!(!args.animations);
+        }
+    }
 
     #[test]
     fn animations_are_enabled_by_default() {

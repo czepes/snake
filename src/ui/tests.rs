@@ -20,6 +20,98 @@ fn tab(ui: &mut Ui, node: &mut Node, now: Instant) {
 }
 
 #[test]
+fn game_controls_follow_player_status_and_role() {
+    let now = Instant::now();
+    let mut node = Node::new(now, 42, 1);
+    host(&mut node, now);
+    let mut view = node.game_view().unwrap();
+    for role in [NodeRole::Master, NodeRole::Deputy, NodeRole::Normal] {
+        for status in [PlayerStatus::Playing, PlayerStatus::Viewing] {
+            view.role = role;
+            view.status = status;
+            let controls = game_controls(&view);
+            let text = controls
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(text.contains("поворот"), status == PlayerStatus::Playing);
+            assert_eq!(text.contains("[R]"), role == NodeRole::Master);
+            assert!(text.contains(if status == PlayerStatus::Playing {
+                "[V] наблюдать"
+            } else {
+                "[V] играть, если есть место"
+            }));
+            for key in ["[Tab]", "[Q] / Esc", "Ctrl+C"] {
+                assert!(text.contains(key));
+            }
+            assert!(controls.iter().all(|line| line.width() <= 38));
+        }
+    }
+}
+
+#[test]
+fn game_sidebar_fits_all_sections_for_six_players() {
+    let now = Instant::now();
+    let mut node = Node::new(now, 42, 1);
+    host(&mut node, now);
+    let mut view = node.game_view().unwrap();
+    let players: Vec<_> = (1..=MAX_PLAYERS)
+        .map(|id| {
+            let mut player = view.players[0].clone();
+            player.id = id as i32;
+            player.name = format!("Игрок {id}");
+            player
+        })
+        .collect();
+    view.players = &players;
+    let ui = Ui::with_animations("Игрок".into(), false);
+    let height = (players.len() as u16 + 3) + 7 + game_controls(&view).len() as u16 + 2;
+    let mut terminal = Terminal::new(TestBackend::new(40, height)).unwrap();
+    terminal.draw(|f| ui.draw_side(f, &view, f.area())).unwrap();
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .chunks(40)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for label in [
+        "Участники",
+        "Игрок 6",
+        "Параметры игры",
+        "Состояние №",
+        "Управление",
+        "Ctrl+C — закрыть приложение",
+    ] {
+        assert!(text.contains(label), "Не отображается: {label}");
+    }
+}
+
+#[test]
+fn game_controls_are_visible_at_minimum_window_size() {
+    let now = Instant::now();
+    let mut node = Node::new(now, 42, 1);
+    host(&mut node, now);
+    let mut ui = Ui::with_animations("Игрок".into(), false);
+    let (width, height, _) = ui.min_size(&node);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|f| ui.draw(f, &node, now, false)).unwrap();
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .chunks(width as usize)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("Управление"));
+    assert!(text.contains("Ctrl+C — закрыть приложение"));
+    assert!(text.contains("Вы играете"));
+}
+
+#[test]
 fn palette_shift_keeps_all_players_distinct_regardless_of_ids_or_order() {
     let now = Instant::now();
     let mut node = Node::new(now, 42, 1);

@@ -116,6 +116,12 @@ impl Ui {
         }
     }
 
+    #[doc(hidden)]
+    pub fn with_boom(mut self, enabled: bool) -> Self {
+        self.animations.set_boom(enabled);
+        self
+    }
+
     fn say(&mut self, now: Instant, text: impl Into<String>, error: bool) {
         let secs = if error { 10 } else { 5 };
         self.msg = Some(Msg {
@@ -371,7 +377,13 @@ impl Ui {
 
     fn min_size(&self, node: &Node) -> (u16, u16, &'static str) {
         match node.phase() {
-            PhaseKind::InGame => (100, 20, "игрового экрана"),
+            PhaseKind::InGame => {
+                let height = node.game_view().map_or(24, |v| {
+                    let players_h = (v.players.len() as u16 + 3).max(5);
+                    players_h + 7 + game_controls(&v).len() as u16 + 2 + 4
+                });
+                (100, height, "игрового экрана")
+            }
             PhaseKind::Joining => (64, 10, "экрана подключения"),
             PhaseKind::Lobby => match self.screen {
                 Screen::Create => (64, 16, "формы создания игры"),
@@ -724,7 +736,7 @@ impl Ui {
         let rows = Layout::vertical([
             Constraint::Length(2),
             Constraint::Min(6),
-            Constraint::Length(3),
+            Constraint::Length(2),
         ])
         .split(f.area());
 
@@ -766,33 +778,12 @@ impl Ui {
         self.draw_side(f, v, body[1]);
 
         let state_line = match v.status {
-            PlayerStatus::Playing => {
-                "Вы играете: стрелки или WASD — поворот   [V] смотреть   [Q] выйти из игры"
-                    .to_owned()
-            }
-            PlayerStatus::Viewing if v.status_pending => "Запрос отправлен ведущему…".to_owned(),
-            PlayerStatus::Viewing => {
-                "Вы наблюдаете. [V] вернуться в игру, если есть место   [Q] выйти из игры"
-                    .to_owned()
-            }
+            PlayerStatus::Playing => "Вы играете",
+            PlayerStatus::Viewing if v.status_pending => "Запрос отправлен ведущему…",
+            PlayerStatus::Viewing => "Вы наблюдаете",
         };
-        let mut palette_help = vec![Span::styled(
-            "[Tab] сменить цвета",
-            Style::new().fg(Color::DarkGray),
-        )];
-        if v.role == NodeRole::Master {
-            palette_help.push(Span::styled(
-                "   [R] пригласить робота с сервера курса",
-                Style::new().fg(Color::DarkGray),
-            ));
-        }
-        let footer = vec![Line::from(state_line), Line::from(palette_help)];
-        let foot = Layout::vertical([
-            Constraint::Length(footer.len() as u16),
-            Constraint::Length(1),
-        ])
-        .split(rows[2]);
-        f.render_widget(Paragraph::new(footer), foot[0]);
+        let foot = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(rows[2]);
+        f.render_widget(Paragraph::new(state_line), foot[0]);
         f.render_widget(self.message_line(), foot[1]);
     }
 
@@ -873,9 +864,11 @@ impl Ui {
 
     fn draw_side(&self, f: &mut Frame, v: &GameView, area: Rect) {
         let players_h = (v.players.len() as u16 + 3).max(5);
+        let controls = game_controls(v);
         let parts = Layout::vertical([
             Constraint::Length(players_h),
-            Constraint::Length(8),
+            Constraint::Length(7),
+            Constraint::Length(controls.len() as u16 + 2),
             Constraint::Min(0),
         ])
         .split(area);
@@ -946,7 +939,29 @@ impl Ui {
             .block(Block::bordered().title(" Параметры игры ")),
             parts[1],
         );
+        f.render_widget(
+            Paragraph::new(controls).block(Block::bordered().title(" Управление ")),
+            parts[2],
+        );
     }
+}
+
+fn game_controls(v: &GameView) -> Vec<Line<'static>> {
+    let mut controls = Vec::new();
+    if v.status == PlayerStatus::Playing {
+        controls.push(Line::from("↑↓←→ / WASD / HJKL — поворот"));
+    }
+    controls.push(Line::from(match v.status {
+        PlayerStatus::Playing => "[V] наблюдать",
+        PlayerStatus::Viewing => "[V] играть, если есть место",
+    }));
+    controls.push(Line::from("[Tab] сменить цвета"));
+    if v.role == NodeRole::Master {
+        controls.push(Line::from("[R] пригласить робота с сервера"));
+    }
+    controls.push(Line::from("[Q] / Esc — выйти в лобби"));
+    controls.push(Line::from("Ctrl+C — закрыть приложение"));
+    controls
 }
 
 fn player_color_index(v: &GameView, id: i32) -> usize {

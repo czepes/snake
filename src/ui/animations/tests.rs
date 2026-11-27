@@ -41,6 +41,7 @@ fn disabled_animations_do_not_track_state_or_change_the_frame() {
     let world = world();
     let view = view(&world);
     let mut animations = Animations::new(false);
+    animations.set_boom(true);
     let mut terminal = Terminal::new(TestBackend::new(30, 12)).unwrap();
     for phase in [
         PhaseKind::Lobby,
@@ -354,6 +355,122 @@ fn palette_shift_recolors_departures_without_restarting_effects() {
             assert_eq!(state.departures.len(), 1);
             assert_eq!(state.departures[0].effect.started, now);
         }
+    }
+}
+
+#[test]
+fn boom_survives_screen_changes_and_only_replaces_departures() {
+    let now = Instant::now();
+    let mut world = world();
+    let mut animations = Animations::new(true);
+    animations.set_boom(true);
+    for phase in [
+        PhaseKind::Lobby,
+        PhaseKind::InGame,
+        PhaseKind::Lobby,
+        PhaseKind::InGame,
+    ] {
+        animations.update(phase, Some(&view(&world)), now);
+        assert!(animations.state.as_ref().unwrap().boom);
+    }
+    let state = animations.state.as_ref().unwrap();
+    assert_eq!(state.appearances[&1].effect.name(), "fade_from");
+    world.snakes.clear();
+    animations.update(PhaseKind::InGame, Some(&view(&world)), now);
+    let state = animations.state.as_ref().unwrap();
+    assert_eq!(state.departures.len(), 1);
+    assert_eq!(state.departures[0].effect.effect.name(), "explode");
+    animations.update(
+        PhaseKind::InGame,
+        Some(&view(&world)),
+        now + Duration::from_millis(100),
+    );
+    assert_eq!(
+        animations.state.as_ref().unwrap().departures[0]
+            .effect
+            .started,
+        now
+    );
+    animations.update(
+        PhaseKind::InGame,
+        Some(&view(&world)),
+        now + Duration::from_secs(60),
+    );
+    assert!(animations.state.as_ref().unwrap().departures.is_empty());
+}
+
+#[test]
+fn explosion_scatters_colored_particles_without_touching_occupied_cells_or_border() {
+    let now = Instant::now();
+    let mut world = world();
+    world.snakes[0].cells = [(5, 5), (4, 5), (3, 5)].into();
+    world.foods.clear();
+    let mut state = State {
+        boom: true,
+        ..State::default()
+    };
+    state.update_board(&view(&world), now);
+    let cells = world.snakes.remove(0).cells;
+    state.update_board(&view(&world), now);
+    world.foods = vec![(3, 4), (4, 4), (5, 4)];
+    world.snakes.push(snake(2, &[(2, 3), (3, 3), (4, 3)]));
+    state.appearances.clear();
+    state.food_effects.clear();
+    let area = Rect::new(4, 5, 24, 12);
+    for cw in [1, 2] {
+        let viewport = BoardViewport::new(area, (0, 0), (10, 10), cw);
+        let mut scattered = false;
+        for offset in 0..super::super::PALETTE.len() {
+            let mut buffer = Buffer::filled(area, ratatui::buffer::Cell::new("."));
+            let before = buffer.clone();
+            let at = now + Duration::from_millis(100);
+            state.render_board(&mut buffer, &view(&world), viewport, at, offset);
+            let mut repeated = before.clone();
+            state.render_board(&mut repeated, &view(&world), viewport, at, offset);
+            assert_eq!(buffer, repeated);
+            for y in area.top()..area.bottom() {
+                for x in area.left()..area.right() {
+                    let pos = (x, y).into();
+                    let occupied = world
+                        .foods
+                        .iter()
+                        .chain(world.snakes[0].cells.iter())
+                        .any(|&cell| viewport.cell_area(cell).unwrap().contains(pos));
+                    let visible = (0..10).any(|cy| {
+                        (0..10).any(|cx| viewport.cell_area((cx, cy)).unwrap().contains(pos))
+                    });
+                    if occupied || !visible {
+                        assert_eq!(buffer[(x, y)], before[(x, y)]);
+                    }
+                    if buffer[(x, y)] != before[(x, y)] {
+                        assert_eq!(buffer[(x, y)].fg, super::super::PALETTE[offset]);
+                        scattered |= !cells
+                            .iter()
+                            .any(|&cell| viewport.cell_area(cell).unwrap().contains(pos));
+                    }
+                }
+            }
+            let mut expired = before.clone();
+            state.render_board(
+                &mut expired,
+                &view(&world),
+                viewport,
+                now + Duration::from_secs(1),
+                offset,
+            );
+            assert_eq!(expired, before);
+        }
+        assert!(scattered, "Частицы должны разлетаться за пределы тела");
+        let mut buffer = Buffer::empty(area);
+        let before = buffer.clone();
+        state.render_board(
+            &mut buffer,
+            &view(&world),
+            BoardViewport::new(area, (7, 7), (10, 10), cw),
+            now,
+            0,
+        );
+        assert_eq!(buffer, before);
     }
 }
 
