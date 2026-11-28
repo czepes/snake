@@ -456,7 +456,7 @@ impl Reliable {
                 });
             }
 
-            if now.duration_since(link.last_rx) > LINK_TIMEOUT {
+            if now.duration_since(link.last_rx) >= LINK_TIMEOUT {
                 dead.push(addr);
             }
         }
@@ -552,6 +552,22 @@ mod tests {
         rel.send_request(&mut ob, t0, addr(1), Kind::State, ping_msg());
         let kinds: Vec<_> = rel.links[&addr(1)].pending.iter().map(|p| p.kind).collect();
         assert_eq!(kinds, vec![Kind::Control, Kind::State]);
+    }
+
+    #[test]
+    fn silent_link_times_out_at_exactly_one_second() {
+        let mut ob = Outbox::new(0);
+        let mut rel = Reliable::new();
+        let t0 = Instant::now();
+        rel.link(addr(1), t0).ping = true;
+        assert!(
+            rel.tick(&mut ob, t0 + Duration::from_millis(999), "g", Some(1))
+                .is_empty()
+        );
+        assert_eq!(
+            rel.tick(&mut ob, t0 + LINK_TIMEOUT, "g", Some(1)),
+            vec![addr(1)]
+        );
     }
 
     #[test]
