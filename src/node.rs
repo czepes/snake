@@ -688,8 +688,8 @@ impl Game {
             .iter()
             .find(|p| p.addr == Some(from))
             .cloned()?;
-        if msg.sender_id.is_some_and(|id| id != player.id)
-            || msg.receiver_id.is_some_and(|id| id != self.my_id)
+        if msg.sender_id != Some(player.id)
+            || msg.receiver_id != Some(self.my_id)
             || !self.rel.can_admit(from)
         {
             return None;
@@ -2002,6 +2002,142 @@ mod tests {
     }
 
     #[test]
+    fn first_status_request_after_zero_join_is_not_treated_as_stale() {
+        let now = Instant::now();
+        let mut node = host_at_order(now, 0);
+        let peer = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 4000);
+        let join = mk(
+            0,
+            None,
+            None,
+            Some("g"),
+            Body::Join {
+                ptype: PlayerType::Human,
+                player_name: "viewer".into(),
+                game_name: "g".into(),
+                status: PlayerStatus::Viewing,
+            },
+        );
+        node.on_datagram(now, peer, false, &encode(&join).unwrap());
+        let change = mk(
+            1,
+            Some(2),
+            Some(1),
+            Some("g"),
+            Body::StatusChange(PlayerStatus::Playing),
+        );
+        node.on_datagram(now, peer, false, &encode(&change).unwrap());
+        assert_eq!(
+            node.game_view()
+                .unwrap()
+                .players
+                .iter()
+                .find(|p| p.id == 2)
+                .unwrap()
+                .status,
+            PlayerStatus::Playing
+        );
+    }
+
+    #[test]
+    fn first_steer_after_zero_join_is_applied() {
+        let now = Instant::now();
+        let mut node = host_at_order(now, 0);
+        let peer = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 4000);
+        let join = mk(
+            0,
+            None,
+            None,
+            Some("g"),
+            Body::Join {
+                ptype: PlayerType::Human,
+                player_name: "player".into(),
+                game_name: "g".into(),
+                status: PlayerStatus::Playing,
+            },
+        );
+        node.on_datagram(now, peer, false, &encode(&join).unwrap());
+        let world = node.debug_world_mut().unwrap();
+        for snake in &mut world.snakes {
+            let head = if snake.owner == 2 { (10, 7) } else { (1, 1) };
+            snake.cells = [head, (head.0 - 1, head.1)].into_iter().collect();
+            snake.dir = Dir::Right;
+        }
+        world.foods.clear();
+        let steer = mk(1, Some(2), Some(1), Some("g"), Body::Steer(Dir::Up));
+        node.on_datagram(now, peer, false, &encode(&steer).unwrap());
+        let ping = mk(2, Some(2), Some(1), Some("g"), Body::Ping);
+        node.on_datagram(
+            now + Duration::from_millis(500),
+            peer,
+            false,
+            &encode(&ping).unwrap(),
+        );
+        node.on_tick(now + Duration::from_secs(1));
+        assert_eq!(
+            node.game_view().unwrap().world.snake(2).unwrap().dir,
+            Dir::Up
+        );
+    }
+
+    #[test]
+    fn master_rejects_each_wrong_participant_id_without_advancing_the_request_window() {
+        let now = Instant::now();
+        let mut node = host_at_order(now, 0);
+        let peer = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 4000);
+        join_viewer(&mut node, now, peer);
+        for (seq, sender, receiver) in [
+            (20, Some(9), Some(1)),
+            (21, Some(2), Some(9)),
+            (22, None, Some(1)),
+            (23, Some(2), None),
+        ] {
+            let request = mk(
+                seq,
+                sender,
+                receiver,
+                Some("g"),
+                Body::StatusChange(PlayerStatus::Playing),
+            );
+            node.on_datagram(now, peer, false, &encode(&request).unwrap());
+        }
+        assert!(node.drain_out().is_empty());
+        assert_eq!(
+            node.game_view()
+                .unwrap()
+                .players
+                .iter()
+                .find(|p| p.id == 2)
+                .unwrap()
+                .status,
+            PlayerStatus::Viewing
+        );
+        let valid = mk(
+            20,
+            Some(2),
+            Some(1),
+            Some("g"),
+            Body::StatusChange(PlayerStatus::Playing),
+        );
+        node.on_datagram(now, peer, false, &encode(&valid).unwrap());
+        assert_eq!(
+            node.game_view()
+                .unwrap()
+                .players
+                .iter()
+                .find(|p| p.id == 2)
+                .unwrap()
+                .status,
+            PlayerStatus::Playing
+        );
+        assert!(node.drain_out().iter().any(|out| match out {
+            Out::Unicast(to, bytes) if *to == peer =>
+                matches!(decode(bytes).unwrap().body, Body::Ack),
+            _ => false,
+        }));
+    }
+
+    #[test]
     fn master_keeps_separate_ordering_for_status_and_steering() {
         let now = Instant::now();
         let mut node = host_at_order(now, 0);
@@ -2041,9 +2177,10 @@ mod tests {
         }
         world.foods.clear();
         send(&mut node, now, 30, Body::Steer(Dir::Up));
+        send(&mut node, now, 31, Body::Steer(Dir::Left));
         send(&mut node, now, 29, Body::Steer(Dir::Down));
         let replies = node.drain_out();
-        for seq in [20, 19, 30, 29] {
+        for seq in [20, 19, 30, 31, 29] {
             assert!(
                 replies.iter().any(|out| match out {
                     Out::Unicast(to, bytes) if *to == peer => {
@@ -2055,6 +2192,7 @@ mod tests {
                 "нет ACK для {seq}"
             );
         }
+        send(&mut node, now + Duration::from_millis(500), 32, Body::Ping);
         let next = now + Duration::from_secs(1);
         node.on_tick(next);
         assert_eq!(
