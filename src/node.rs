@@ -145,6 +145,12 @@ enum Flow {
     Left,
 }
 
+impl Flow {
+    fn exhausted_order() -> Self {
+        Flow::Ended("Исчерпан диапазон state_order".into())
+    }
+}
+
 /// Сообщение о выходе, которое ещё повторяется после ухода из игры.
 struct Closing {
     to: SocketAddrV4,
@@ -433,8 +439,11 @@ impl Game {
 
     /// Публикует новое состояние всем участникам, увеличивая `state_order`.
     /// Публикация между ходами не двигает змеек и не меняет `next_tick`.
-    fn publish(&mut self, cx: &mut Ctx) {
-        self.order = self.order.saturating_add(1);
+    fn publish(&mut self, cx: &mut Ctx) -> Flow {
+        let Some(next) = self.order.checked_add(1) else {
+            return Flow::exhausted_order();
+        };
+        self.order = next;
         let state = self.build_state();
         let targets: Vec<(SocketAddrV4, i32)> = self
             .players
@@ -463,6 +472,7 @@ impl Game {
             );
             self.rel.send_request(cx.ob, cx.now, addr, Kind::Control, m);
         }
+        Flow::Continue
     }
 
     /// Назначает DEPUTY, если его нет и есть кандидат (любой NORMAL, включая наблюдателей).
@@ -531,10 +541,10 @@ impl Game {
     }
 
     /// Завершает изменение состава/статусов без движения: заместитель, еда, снимок.
-    fn after_change(&mut self, cx: &mut Ctx) {
+    fn after_change(&mut self, cx: &mut Ctx) -> Flow {
         self.ensure_deputy();
         self.world.refill_food(cx.rng);
-        self.publish(cx);
+        self.publish(cx)
     }
 
     /// Отказывает в операции: Error имеет собственный seq, но ссылается на req_seq.
@@ -657,8 +667,7 @@ impl Game {
             "К игре присоединился «{}»",
             self.players.last().map_or("", |p| p.name.as_str())
         ));
-        self.after_change(cx);
-        Flow::Continue
+        self.after_change(cx)
     }
 
     /// Входящие на MASTER: ACK отдельно, затем Join или запрос участника.
@@ -668,7 +677,7 @@ impl Game {
         match &msg.body {
             Body::Ack => {
                 if let Some(p) = self.rel.on_ack(cx.now, from, msg.seq) {
-                    self.on_acked(cx, from, &p.msg);
+                    return self.on_acked(cx, from, &p.msg);
                 }
                 return Flow::Continue;
             }
@@ -760,7 +769,7 @@ impl Game {
                         );
                         self.rel.record(from, msg.seq, Some(ack));
                         if changed {
-                            self.after_change(cx);
+                            return self.after_change(cx);
                         }
                     }
                     Err(why) => self.m_error(cx, from, Some(pl.id), msg.seq, why),
@@ -778,7 +787,7 @@ impl Game {
                 self.rel.record(from, msg.seq, Some(ack));
                 cx.notice(format!("«{}» вышел из игры", pl.name));
                 self.remove_player(pl.id);
-                self.after_change(cx);
+                return self.after_change(cx);
             }
             _ => {}
         }
@@ -786,14 +795,18 @@ impl Game {
     }
 
     /// Реакция на ACK нашего сообщения (нужна при передаче управления).
-    fn on_acked(&mut self, cx: &mut Ctx, from: SocketAddrV4, acked: &Message) {
-        let Some(l) = &self.leaving else { return };
+    fn on_acked(&mut self, cx: &mut Ctx, from: SocketAddrV4, acked: &Message) -> Flow {
+        let Some(l) = &self.leaving else {
+            return Flow::Continue;
+        };
         if l.to != from {
-            return;
+            return Flow::Continue;
         }
         match l.stage {
             HandoverStage::State(seq) if seq == acked.seq => {
-                let order = self.order.saturating_add(1);
+                let Some(order) = self.order.checked_add(1) else {
+                    return Flow::exhausted_order();
+                };
                 let m = self.msg(
                     self.players
                         .iter()
@@ -818,11 +831,12 @@ impl Game {
             }
             _ => {}
         }
+        Flow::Continue
     }
 
     /// Сначала обслуживает связь, затем при наступлении срока рассчитывает ход.
     /// Даже при медленной игре повторы, Ping и удаление недоступных узлов идут чаще ходов.
-    fn m_tick(&mut self, cx: &mut Ctx) {
+    fn m_tick(&mut self, cx: &mut Ctx) -> Flow {
         let dead = self.rel.tick(cx.ob, cx.now, &self.name, Some(self.my_id));
         let mut changed = false;
         for addr in dead {
@@ -839,7 +853,10 @@ impl Game {
             }
         }
         if changed {
-            self.after_change(cx);
+            let flow = self.after_change(cx);
+            if !matches!(flow, Flow::Continue) {
+                return flow;
+            }
         }
 
         let delay = Duration::from_millis(self.cfg().state_delay_ms as u64);
@@ -863,7 +880,10 @@ impl Game {
                 }
             }
             self.world.refill_food(cx.rng);
-            self.publish(cx);
+            let flow = self.publish(cx);
+            if !matches!(flow, Flow::Continue) {
+                return flow;
+            }
             self.m.next_tick += delay;
             // Если сильно отстали (пауза процесса), не пытаемся нагнать пачкой ходов.
             if cx.now.saturating_duration_since(self.m.next_tick) > delay * 3 {
@@ -884,6 +904,7 @@ impl Game {
             cx.ob.multicast(&m);
             self.m.next_announce = cx.now + ANNOUNCE_PERIOD;
         }
+        Flow::Continue
     }
 
     // ───────────────────────── Действия участника ────────────────────────────
@@ -1089,6 +1110,12 @@ impl Game {
     /// удаляется. `graceful_order` задаёт версию первой публикации при штатном выходе.
     /// Не дошедшие до DEPUTY изменения здесь восстановить невозможно.
     fn become_master(&mut self, cx: &mut Ctx, graceful_order: Option<i32>) -> Flow {
+        let Some(min_next) = self.order.checked_add(1) else {
+            return Flow::exhausted_order();
+        };
+        let next = graceful_order
+            .filter(|&n| n >= min_next)
+            .unwrap_or(min_next);
         let old_addr = self.master_addr.take();
         if let Some(old_id) = self.master_id()
             && old_id != self.my_id
@@ -1117,10 +1144,6 @@ impl Game {
         self.m = MasterState::new(cx.now, delay);
         self.failover_used = false;
 
-        let next = match graceful_order {
-            Some(n) if n > self.order => n,
-            _ => self.order.saturating_add(1),
-        };
         // publish сам прибавит единицу: первая версия нового MASTER должна
         // продолжить прежнюю нумерацию, а не начать её заново.
         self.order = next - 1;
@@ -1144,9 +1167,9 @@ impl Game {
             );
             self.rel.send_request(cx.ob, cx.now, addr, Kind::Control, m);
         }
-        self.publish(cx);
+        let flow = self.publish(cx);
         cx.notice("Вы стали ведущим игры");
-        Flow::Continue
+        flow
     }
 
     // ─────────────────────────────── Выход ───────────────────────────────────
@@ -1219,7 +1242,7 @@ impl Game {
             if matches!(msg.body, Body::Ack)
                 && let Some(p) = self.rel.on_ack(cx.now, from, msg.seq)
             {
-                self.on_acked(cx, from, &p.msg);
+                return self.on_acked(cx, from, &p.msg);
             }
             return Flow::Continue;
         }
@@ -1235,8 +1258,7 @@ impl Game {
             return self.leave_tick(cx);
         }
         if self.role == NodeRole::Master {
-            self.m_tick(cx);
-            Flow::Continue
+            self.m_tick(cx)
         } else {
             self.p_tick(cx)
         }
@@ -1256,14 +1278,14 @@ impl Game {
         }
     }
 
-    fn toggle_watch(&mut self, cx: &mut Ctx) {
+    fn toggle_watch(&mut self, cx: &mut Ctx) -> Flow {
         let target = match self.status {
             PlayerStatus::Playing => PlayerStatus::Viewing,
             PlayerStatus::Viewing => PlayerStatus::Playing,
         };
         if self.role == NodeRole::Master {
             match self.set_status(cx, self.my_id, target) {
-                Ok(true) => self.after_change(cx),
+                Ok(true) => return self.after_change(cx),
                 Ok(false) => {}
                 Err(why) => cx.ev.push(Event::Failure(why.to_owned())),
             }
@@ -1271,6 +1293,7 @@ impl Game {
             let m = self.msg(self.master_id(), Body::StatusChange(target));
             self.rel.send_request(cx.ob, cx.now, to, Kind::Control, m);
         }
+        Flow::Continue
     }
 }
 
@@ -1515,7 +1538,7 @@ impl Node {
             }
             Command::ToggleWatch => {
                 if let Phase::InGame(g) = phase {
-                    g.toggle_watch(&mut cx);
+                    flow = g.toggle_watch(&mut cx);
                 }
             }
             Command::InviteRobot
@@ -1797,6 +1820,161 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn host_at_order(now: Instant, order: i32) -> Node {
+        let mut node = Node::new(now, 1, 1);
+        node.command(
+            now,
+            Command::Host {
+                game: "g".into(),
+                player: "host".into(),
+                cfg: Config::default(),
+            },
+        );
+        let Phase::InGame(game) = &mut node.phase else {
+            panic!("игра не создана");
+        };
+        game.order = order;
+        node.drain_events();
+        node
+    }
+
+    fn join_viewer(node: &mut Node, now: Instant, addr: SocketAddrV4) {
+        let join = mk(
+            1,
+            None,
+            None,
+            Some("g"),
+            Body::Join {
+                ptype: PlayerType::Human,
+                player_name: "deputy".into(),
+                game_name: "g".into(),
+                status: PlayerStatus::Viewing,
+            },
+        );
+        node.on_datagram(now, addr, false, &encode(&join).unwrap());
+        node.drain_out();
+        node.drain_events();
+    }
+
+    #[test]
+    fn state_order_ends_game_instead_of_publishing_the_same_version_twice() {
+        let now = Instant::now();
+        let mut node = host_at_order(now, 0);
+        let deputy = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 4000);
+        join_viewer(&mut node, now, deputy);
+        let Phase::InGame(game) = &mut node.phase else {
+            unreachable!();
+        };
+        game.order = i32::MAX - 1;
+        node.command(now, Command::ToggleWatch);
+        assert_eq!(node.game_view().unwrap().order, i32::MAX);
+        assert!(node.drain_out().iter().any(|out| match out {
+            Out::Unicast(to, bytes) if *to == deputy => {
+                matches!(decode(bytes).unwrap().body, Body::State(state) if state.order == i32::MAX)
+            }
+            _ => false,
+        }));
+
+        node.command(now, Command::ToggleWatch);
+        assert!(node.drain_out().is_empty());
+        assert_eq!(node.phase(), PhaseKind::Lobby);
+        assert!(node.drain_events().iter().any(
+            |event| matches!(event, Event::GameOver(reason) if reason.contains("state_order"))
+        ));
+    }
+
+    fn deputy_at_order(now: Instant, order: i32) -> Node {
+        let mut node = host_at_order(now, order);
+        let master = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 4000);
+        let Phase::InGame(game) = &mut node.phase else {
+            unreachable!();
+        };
+        game.role = NodeRole::Deputy;
+        game.players[0].role = NodeRole::Deputy;
+        game.players.push(PlayerInfo {
+            name: "master".into(),
+            id: 2,
+            addr: Some(master),
+            role: NodeRole::Master,
+            ptype: PlayerType::Human,
+            score: 0,
+            status: PlayerStatus::Viewing,
+        });
+        game.master_addr = Some(master);
+        let link = game.rel.link(master, now);
+        link.peer_id = Some(2);
+        link.ping = true;
+        node
+    }
+
+    #[test]
+    fn deputy_can_use_the_last_order_after_failover() {
+        let now = Instant::now();
+        let mut node = deputy_at_order(now, i32::MAX - 1);
+        node.on_tick(now + Duration::from_millis(1001));
+        assert_eq!(node.game_view().unwrap().role, NodeRole::Master);
+        assert_eq!(node.game_view().unwrap().order, i32::MAX);
+        node.on_tick(now + Duration::from_millis(2001));
+        assert_eq!(node.phase(), PhaseKind::Lobby);
+        assert!(node.drain_events().iter().any(
+            |event| matches!(event, Event::GameOver(reason) if reason.contains("state_order"))
+        ));
+    }
+
+    #[test]
+    fn deputy_does_not_publish_a_reused_order_on_failover() {
+        let now = Instant::now();
+        let mut node = deputy_at_order(now, i32::MAX);
+        node.on_tick(now + Duration::from_millis(1001));
+        assert_eq!(node.phase(), PhaseKind::Lobby);
+        assert!(node.drain_events().iter().any(
+            |event| matches!(event, Event::GameOver(reason) if reason.contains("state_order"))
+        ));
+        assert!(!node.drain_out().iter().any(|out| match out {
+            Out::Unicast(_, bytes) | Out::Multicast(bytes) => {
+                matches!(
+                    decode(bytes).unwrap().body,
+                    Body::State(_) | Body::RoleChange { .. }
+                )
+            }
+        }));
+    }
+
+    #[test]
+    fn master_cannot_handover_with_an_exhausted_state_order() {
+        let now = Instant::now();
+        let mut node = host_at_order(now, 0);
+        let deputy = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 4000);
+        join_viewer(&mut node, now, deputy);
+        let Phase::InGame(game) = &mut node.phase else {
+            unreachable!();
+        };
+        game.order = i32::MAX;
+        node.command(now, Command::Leave);
+        let state = node
+            .drain_out()
+            .into_iter()
+            .find_map(|out| match out {
+                Out::Unicast(_, bytes) => {
+                    let message = decode(&bytes).unwrap();
+                    matches!(message.body, Body::State(_)).then_some(message)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let ack = mk(state.seq, Some(2), Some(1), Some("g"), Body::Ack);
+        node.on_datagram(now, deputy, false, &encode(&ack).unwrap());
+        assert_eq!(node.phase(), PhaseKind::Lobby);
+        assert!(node.drain_events().iter().any(
+            |event| matches!(event, Event::GameOver(reason) if reason.contains("state_order"))
+        ));
+        assert!(!node.drain_out().iter().any(|out| match out {
+            Out::Unicast(_, bytes) | Out::Multicast(bytes) => {
+                matches!(decode(bytes).unwrap().body, Body::RoleChange { .. })
+            }
+        }));
+    }
 
     #[test]
     fn sequence_exhaustion_ends_the_session_without_reusing_a_number() {
