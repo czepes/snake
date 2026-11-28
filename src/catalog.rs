@@ -66,12 +66,12 @@ impl Entry {
 
     /// Можно ли присоединиться наблюдателем.
     pub fn can_watch(&self) -> bool {
-        self.can_join && self.participants() < MAX_PLAYERS
+        self.participants() < MAX_PLAYERS
     }
 
     /// Можно ли присоединиться игроком: нужны место для участника и для змейки.
     pub fn can_play(&self) -> bool {
-        self.can_watch() && self.snakes() < MAX_SNAKES
+        self.can_join && self.can_watch() && self.snakes() < MAX_SNAKES
     }
 }
 
@@ -210,6 +210,19 @@ mod tests {
         c.ingest(t, a(1), &[ann("g", 1)], Source::Lan);
         c.ingest(t, a(2), &[ann("g", 1)], Source::Lan);
         assert_eq!(c.list().len(), 2);
+    }
+
+    #[test]
+    fn playing_availability_does_not_prevent_spectating() {
+        let mut c = Catalog::new();
+        let t = Instant::now();
+        let mut game = ann("crowded", 1);
+        game.can_join = false;
+        c.ingest(t, a(1), &[game], Source::Lan);
+
+        let entry = c.list()[0];
+        assert!(!entry.can_play());
+        assert!(entry.can_watch());
     }
 
     #[test]
