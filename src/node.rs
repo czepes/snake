@@ -772,6 +772,9 @@ impl Game {
                         if changed {
                             return self.after_change(cx);
                         }
+                        let state = self.msg(Some(pl.id), Body::State(self.build_state()));
+                        self.rel
+                            .send_request(cx.ob, cx.now, from, Kind::State, state);
                     }
                     Err(why) => self.m_error(cx, from, Some(pl.id), msg.seq, why),
                 }
@@ -1856,6 +1859,38 @@ mod tests {
         node.on_datagram(now, addr, false, &encode(&join).unwrap());
         node.drain_out();
         node.drain_events();
+    }
+
+    #[test]
+    fn requesting_the_current_status_returns_the_current_state_without_a_new_version() {
+        let now = Instant::now();
+        let mut node = host_at_order(now, 0);
+        let viewer = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 4000);
+        join_viewer(&mut node, now, viewer);
+        let order = node.game_view().unwrap().order;
+        let request = mk(
+            2,
+            Some(2),
+            Some(1),
+            Some("g"),
+            Body::StatusChange(PlayerStatus::Viewing),
+        );
+        node.on_datagram(now, viewer, false, &encode(&request).unwrap());
+        let packets: Vec<_> = node
+            .drain_out()
+            .into_iter()
+            .filter_map(|out| match out {
+                Out::Unicast(to, bytes) if to == viewer => Some(decode(&bytes).unwrap()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            packets
+                .iter()
+                .any(|m| m.seq == request.seq && matches!(m.body, Body::Ack))
+        );
+        assert!(packets.iter().any(|m| matches!(&m.body, Body::State(state) if state.order == order && state.players.iter().any(|p| p.id == 2 && p.status == PlayerStatus::Viewing))));
+        assert_eq!(node.game_view().unwrap().order, order);
     }
 
     #[test]
