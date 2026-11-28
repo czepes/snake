@@ -720,6 +720,104 @@ fn graceful_master_exit_hands_over_without_timeout() {
 }
 
 #[test]
+fn master_handover_waits_for_each_ack_in_order() {
+    let mut sim = Sim::new(2, 53);
+    sim.host(0, "g", "A");
+    sim.join(1, 0, "g", "B", PlayerStatus::Viewing);
+    sim.run(600);
+    assert_eq!(sim.view(1).role, NodeRole::Deputy);
+
+    let now = sim.now;
+    let master = &mut sim.nodes[0].node;
+    master.command(now, Command::Leave);
+    let state = master
+        .drain_out()
+        .into_iter()
+        .find_map(|out| match out {
+            Out::Unicast(to, bytes) if to == addr_of(1) => {
+                let msg = decode(&bytes).unwrap();
+                matches!(msg.body, Body::State(_)).then_some(msg)
+            }
+            _ => None,
+        })
+        .expect("ожидался снимок для заместителя");
+
+    let ack = |seq| Message {
+        seq,
+        sender_id: Some(2),
+        receiver_id: Some(1),
+        game_name: Some("g".into()),
+        body: Body::Ack,
+    };
+    master.on_datagram(now, addr_of(2), false, &encode(&ack(state.seq)).unwrap());
+    assert!(master.drain_out().is_empty());
+    let retry_time = now + Duration::from_millis(100);
+    master.on_tick(retry_time);
+    assert!(master.drain_out().iter().any(|out| match out {
+        Out::Unicast(to, bytes) => *to == addr_of(1) && decode(bytes).unwrap() == state,
+        _ => false,
+    }));
+
+    master.on_datagram(
+        retry_time,
+        addr_of(1),
+        false,
+        &encode(&ack(state.seq)).unwrap(),
+    );
+    let role = master
+        .drain_out()
+        .into_iter()
+        .find_map(|out| match out {
+            Out::Unicast(to, bytes) if to == addr_of(1) => {
+                let msg = decode(&bytes).unwrap();
+                matches!(
+                    msg.body,
+                    Body::RoleChange {
+                        sender: Some(NodeRole::Normal),
+                        receiver: Some(NodeRole::Master),
+                        ..
+                    }
+                )
+                .then_some(msg)
+            }
+            _ => None,
+        })
+        .expect("после ACK снимка должна передаваться роль");
+    master.on_datagram(
+        retry_time,
+        addr_of(1),
+        false,
+        &encode(&ack(state.seq)).unwrap(),
+    );
+    master.on_tick(retry_time);
+    assert_eq!(master.phase(), PhaseKind::InGame);
+
+    master.on_datagram(
+        retry_time,
+        addr_of(1),
+        false,
+        &encode(&ack(role.seq)).unwrap(),
+    );
+    master.on_tick(retry_time);
+    assert_eq!(master.phase(), PhaseKind::Lobby);
+}
+
+#[test]
+fn master_handover_does_not_wait_forever_for_ack() {
+    let mut sim = Sim::new(2, 54);
+    sim.host(0, "g", "A");
+    sim.join(1, 0, "g", "B", PlayerStatus::Viewing);
+    sim.run(600);
+    let now = sim.now;
+    let master = &mut sim.nodes[0].node;
+    master.command(now, Command::Leave);
+    master.on_tick(now + Duration::from_millis(999));
+    assert_eq!(master.phase(), PhaseKind::InGame);
+    master.on_tick(now + Duration::from_millis(1000));
+    assert_eq!(master.phase(), PhaseKind::Lobby);
+}
+
+#[test]
 fn normal_participant_leaving_is_removed_immediately() {
     let mut sim = Sim::new(3, 14);
     sim.host(0, "g", "A");
@@ -802,6 +900,105 @@ fn server_style_creation_by_join_learns_config_via_discover() {
     );
     assert_eq!(sim.view(0).name, "новая");
     assert_eq!(sim.view(0).players.len(), 2);
+}
+
+#[test]
+fn joining_accepts_ack_state_and_config_in_any_order() {
+    for order in [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ] {
+        let now = Instant::now();
+        let mut master = Node::new(now, 1, 1);
+        let mut client = Node::new(now, 2, 1);
+        master.command(
+            now,
+            Command::Host {
+                game: "order".into(),
+                player: "master".into(),
+                cfg: Config::default(),
+            },
+        );
+        client.set_server(Some(addr_of(0)));
+        client.command(
+            now,
+            Command::HostOnServer {
+                game: "order".into(),
+                player: "client".into(),
+            },
+        );
+        let join = client
+            .drain_out()
+            .into_iter()
+            .find_map(|out| match out {
+                Out::Unicast(_, bytes) => Some(bytes),
+                _ => None,
+            })
+            .unwrap();
+        master.on_datagram(now, addr_of(1), false, &join);
+        master.on_tick(now);
+        let mut packets: [Option<Vec<u8>>; 3] = [None, None, None];
+        for out in master.drain_out() {
+            let bytes = match out {
+                Out::Unicast(_, bytes) | Out::Multicast(bytes) => bytes,
+            };
+            let index = match decode(&bytes).unwrap().body {
+                Body::Ack => 0,
+                Body::State(_) => 1,
+                Body::Announcement(_) => 2,
+                _ => continue,
+            };
+            packets[index] = Some(bytes);
+        }
+        client.on_datagram(now, addr_of(2), false, packets[0].as_ref().unwrap());
+        client.on_datagram(now, addr_of(2), false, packets[2].as_ref().unwrap());
+        assert!(!client.joining_view().unwrap().acked);
+        assert!(!client.joining_view().unwrap().has_config);
+
+        let mut newer = decode(packets[1].as_ref().unwrap()).unwrap();
+        newer.seq += 100;
+        let Body::State(ref mut state) = newer.body else {
+            unreachable!()
+        };
+        state.order += 10;
+        let expected_order = state.order;
+        for (i, index) in order.into_iter().enumerate() {
+            if index == 1 {
+                client.on_datagram(now, addr_of(0), false, &encode(&newer).unwrap());
+            }
+            client.on_datagram(
+                now,
+                addr_of(0),
+                index == 2,
+                packets[index].as_ref().unwrap(),
+            );
+            if index == 1 {
+                assert!(
+                    client.drain_out().iter().any(|out| match out {
+                        Out::Unicast(to, bytes) =>
+                            *to == addr_of(0) && matches!(decode(bytes).unwrap().body, Body::Ack),
+                        _ => false,
+                    }),
+                    "State must be acknowledged even before joining completes: {order:?}"
+                );
+            }
+            if i < 2 {
+                assert_eq!(client.phase(), PhaseKind::Joining, "{order:?}");
+            }
+        }
+        let view = client
+            .game_view()
+            .unwrap_or_else(|| panic!("joining failed for {order:?}"));
+        assert_eq!(view.name, "order");
+        assert_eq!(view.my_id, 2);
+        assert_eq!(view.players.len(), 2);
+        assert_eq!(view.status, PlayerStatus::Playing);
+        assert_eq!(view.order, expected_order);
+    }
 }
 
 #[test]

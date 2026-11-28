@@ -10,6 +10,7 @@
 //! [`Node`] владеет каталогом, общей очередью отправки и одной из фаз:
 //! `Lobby → Joining → InGame → Lobby`. `Joining` отдельно собирает ACK на Join,
 //! конфигурацию из анонса и первый снимок: UDP не гарантирует порядок их прихода.
+//! Подключение инкапсулировано в `joining`; переходы фаз выполняет `Node`.
 //! `Game` хранит уже начатую сессию; методы `m_*` обслуживают MASTER,
 //! а `p_*` — участника, следующего за ним (NORMAL или DEPUTY).
 //!
@@ -26,6 +27,9 @@ use crate::catalog::{Catalog, Entry, GameKey, Source};
 use crate::reliable::{Kind, Out, Outbox, Reliable, Seen, describe};
 use crate::rules::{Rng, Snake, World};
 use crate::wire::*;
+
+mod joining;
+use joining::{JoinStep, Joining};
 
 /// Общий срок на присоединение: ACK, конфигурация и первое состояние.
 pub const JOIN_DEADLINE: Duration = Duration::from_millis(5000);
@@ -157,11 +161,16 @@ enum Phase {
 
 /// Передача управления при выходе MASTER с общим дедлайном на обе стадии.
 struct Leaving {
-    /// 1 — ждём ACK на State, 2 — на RoleChange, 3 — можно закрывать сессию.
-    stage: u8,
+    stage: HandoverStage,
     deadline: Instant,
     to: SocketAddrV4,
-    wait_seq: i64,
+}
+
+#[derive(Clone, Copy)]
+enum HandoverStage {
+    State(i64),
+    RoleChange(i64),
+    Complete,
 }
 
 /// Данные, используемые только ведущим; при повышении DEPUTY создаются заново.
@@ -209,31 +218,6 @@ struct Game {
     rel: Reliable,
     m: MasterState,
     leaving: Option<Leaving>,
-}
-
-/// Независимо собирает подтверждение регистрации, конфиг и самый новый State.
-/// Отсутствие конфига не мешает подтверждать пакеты и повторять Join.
-struct Joining {
-    key: GameKey,
-    /// Начало всей попытки: повторные пакеты не продлевают дедлайн.
-    started: Instant,
-    join_seq: i64,
-    cfg: Option<Config>,
-    acked: bool,
-    my_id: Option<i32>,
-    /// Предварительный ID из State, если тот обогнал ACK на Join.
-    early_id: Option<i32>,
-    master_id: Option<i32>,
-    /// Единственный снимок с максимальным order и его receiver_id.
-    buffered: Option<(StateMsg, Option<i32>)>,
-    last_discover: Instant,
-    rel: Reliable,
-}
-
-enum JoinStep {
-    Wait,
-    Done(Box<Game>),
-    Failed(String),
 }
 
 fn mk(
@@ -802,37 +786,35 @@ impl Game {
 
     /// Реакция на ACK нашего сообщения (нужна при передаче управления).
     fn on_acked(&mut self, cx: &mut Ctx, from: SocketAddrV4, acked: &Message) {
-        let Some(l) = &mut self.leaving else { return };
-        if l.to != from || l.wait_seq != acked.seq {
+        let Some(l) = &self.leaving else { return };
+        if l.to != from {
             return;
         }
-        if l.stage == 1 {
-            // Состояние доставлено заместителю: передаём управление.
-            l.stage = 2;
-            let to = l.to;
-            let order = self.order.saturating_add(1);
-            let m = self.msg(
-                self.players
-                    .iter()
-                    .find(|p| p.addr == Some(to))
-                    .map(|p| p.id),
-                Body::RoleChange {
-                    sender: Some(NodeRole::Normal),
-                    receiver: Some(NodeRole::Master),
-                    order,
-                },
-            );
-            let sent = self.rel.send_request(cx.ob, cx.now, to, Kind::Control, m);
-            if let Some(l) = &mut self.leaving {
-                l.wait_seq = sent.seq;
+        match l.stage {
+            HandoverStage::State(seq) if seq == acked.seq => {
+                let order = self.order.saturating_add(1);
+                let m = self.msg(
+                    self.players
+                        .iter()
+                        .find(|p| p.addr == Some(from))
+                        .map(|p| p.id),
+                    Body::RoleChange {
+                        sender: Some(NodeRole::Normal),
+                        receiver: Some(NodeRole::Master),
+                        order,
+                    },
+                );
+                let sent = self.rel.send_request(cx.ob, cx.now, from, Kind::Control, m);
+                if let Some(l) = &mut self.leaving {
+                    l.stage = HandoverStage::RoleChange(sent.seq);
+                }
             }
-        } else {
-            self.leaving = Some(Leaving {
-                stage: 3,
-                deadline: cx.now,
-                to: l.to,
-                wait_seq: -1,
-            });
+            HandoverStage::RoleChange(seq) if seq == acked.seq => {
+                if let Some(l) = &mut self.leaving {
+                    l.stage = HandoverStage::Complete;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1205,10 +1187,9 @@ impl Game {
         let m = self.msg(Some(id), Body::State(state));
         let sent = self.rel.send_request(cx.ob, cx.now, addr, Kind::Control, m);
         self.leaving = Some(Leaving {
-            stage: 1,
+            stage: HandoverStage::State(sent.seq),
             deadline: cx.now + LEAVE_DEADLINE,
             to: addr,
-            wait_seq: sent.seq,
         });
         Flow::Continue
     }
@@ -1217,7 +1198,9 @@ impl Game {
         let dead = self.rel.tick(cx.ob, cx.now, &self.name, Some(self.my_id));
         let _ = dead;
         match &self.leaving {
-            Some(l) if l.stage == 3 || cx.now >= l.deadline => Flow::Left,
+            Some(l) if matches!(l.stage, HandoverStage::Complete) || cx.now >= l.deadline => {
+                Flow::Left
+            }
             _ => Flow::Continue,
         }
     }
@@ -1284,181 +1267,6 @@ impl Game {
             let m = self.msg(self.master_id(), Body::StatusChange(target));
             self.rel.send_request(cx.ob, cx.now, to, Kind::Control, m);
         }
-    }
-}
-
-// ─────────────────────────────── Присоединение ───────────────────────────────
-
-impl Joining {
-    fn start(
-        cx: &mut Ctx,
-        key: GameKey,
-        player: String,
-        status: PlayerStatus,
-        cfg: Option<Config>,
-    ) -> Joining {
-        let mut rel = Reliable::new();
-        let join = mk(
-            0,
-            None,
-            None,
-            Some(&key.name),
-            Body::Join {
-                ptype: PlayerType::Human,
-                player_name: player,
-                game_name: key.name.clone(),
-                status,
-            },
-        );
-        let sent = rel.send_request(cx.ob, cx.now, key.addr, Kind::Control, join);
-        Joining {
-            key,
-            started: cx.now,
-            join_seq: sent.seq,
-            cfg,
-            acked: false,
-            my_id: None,
-            early_id: None,
-            master_id: None,
-            buffered: None,
-            last_discover: cx.now,
-            rel,
-        }
-    }
-
-    fn failure_reason(&self) -> String {
-        let why = if !self.acked {
-            "нет ответа на запрос присоединения (ACK не получен)"
-        } else if self.cfg.is_none() {
-            "не получена конфигурация игры"
-        } else {
-            "не получено состояние игры"
-        };
-        format!("Не удалось подключиться к «{}»: {why}", self.key.name)
-    }
-
-    fn on_message(&mut self, cx: &mut Ctx, from: SocketAddrV4, msg: Message) -> JoinStep {
-        if from != self.key.addr || msg.game_name.as_deref() != Some(self.key.name.as_str()) {
-            return JoinStep::Wait;
-        }
-        let name = self.key.name.clone();
-        let my_id = self.my_id.or(self.early_id);
-        match msg.body {
-            Body::Ack if let Some(p) = self.rel.on_ack(cx.now, from, msg.seq) => {
-                if matches!(p.msg.body, Body::Join { .. }) {
-                    if let (Some(early), Some(given)) = (self.early_id, msg.receiver_id)
-                        && early != given
-                    {
-                        return JoinStep::Failed(
-                            "Ведущий выдал противоречивые ID участника".into(),
-                        );
-                    }
-                    self.acked = true;
-                    self.my_id = msg.receiver_id.or(self.early_id);
-                    self.master_id = msg.sender_id;
-                }
-            }
-            Body::Ack => {}
-            Body::Error {
-                ref text,
-                request_seq,
-            } => {
-                accept_request(&mut self.rel, cx, from, &msg, my_id, self.master_id, &name);
-                if request_seq == self.join_seq {
-                    return JoinStep::Failed(format!("Ведущий отклонил присоединение: {text}"));
-                }
-            }
-            Body::State(ref s) => {
-                if accept_request(&mut self.rel, cx, from, &msg, my_id, self.master_id, &name) {
-                    if !self.acked {
-                        self.early_id = self.early_id.or(msg.receiver_id);
-                    }
-                    let newer = self
-                        .buffered
-                        .as_ref()
-                        .is_none_or(|(b, _)| s.order > b.order);
-                    if newer {
-                        self.buffered = Some((s.clone(), msg.receiver_id));
-                    }
-                }
-            }
-            Body::Ping | Body::RoleChange { .. } => {
-                accept_request(&mut self.rel, cx, from, &msg, my_id, self.master_id, &name);
-            }
-            _ => {}
-        }
-        self.try_complete(cx)
-    }
-
-    /// Превращает накопленные части подключения в полноценную сессию.
-    /// Переносит, а не пересоздаёт `Reliable`, сохраняя ответы на ранние пакеты
-    /// и ещё не подтверждённые исходящие сообщения.
-    fn try_complete(&mut self, cx: &mut Ctx) -> JoinStep {
-        if !self.acked || self.cfg.is_none() {
-            return JoinStep::Wait;
-        }
-        let Some((state, rid)) = self.buffered.take() else {
-            return JoinStep::Wait;
-        };
-        let cfg = self.cfg.unwrap_or_default();
-        let Some(my_id) = self.my_id.or(rid) else {
-            self.buffered = Some((state, rid));
-            return JoinStep::Wait;
-        };
-        let (world, players, next_id) = match validate_state(cfg, &state) {
-            Ok(v) => v,
-            Err(why) => {
-                return JoinStep::Failed(format!("Получено некорректное состояние игры: {why}"));
-            }
-        };
-        let Some(me) = players.iter().find(|p| p.id == my_id).cloned() else {
-            return JoinStep::Failed("В состоянии игры нет вашего участника".into());
-        };
-        if me.role == NodeRole::Master {
-            return JoinStep::Failed("Ведущий указал вас как ведущего".into());
-        }
-        let master_id = players
-            .iter()
-            .find(|p| p.role == NodeRole::Master)
-            .map(|p| p.id);
-        let mut rel = std::mem::take(&mut self.rel);
-        let link = rel.link(self.key.addr, cx.now);
-        link.peer_id = master_id;
-        link.ping = true;
-        link.last_rx = cx.now;
-        link.last_tx = cx.now;
-        let delay = Duration::from_millis(cfg.state_delay_ms as u64);
-        JoinStep::Done(Box::new(Game {
-            name: self.key.name.clone(),
-            my_id,
-            role: me.role,
-            status: me.status,
-            world,
-            players,
-            order: state.order,
-            next_id,
-            master_addr: Some(self.key.addr),
-            failover_used: false,
-            rel,
-            m: MasterState::new(cx.now, delay),
-            leaving: None,
-        }))
-    }
-
-    fn tick(&mut self, cx: &mut Ctx) -> JoinStep {
-        self.rel.tick(cx.ob, cx.now, &self.key.name, self.my_id);
-        if self.cfg.is_none()
-            && self.acked
-            && cx.now.duration_since(self.last_discover) >= JOIN_DISCOVER_PERIOD
-        {
-            let m = mk(cx.ob.seq(), None, None, None, Body::Discover);
-            cx.ob.unicast(self.key.addr, &m);
-            self.last_discover = cx.now;
-        }
-        if cx.now.duration_since(self.started) > JOIN_DEADLINE {
-            return JoinStep::Failed(self.failure_reason());
-        }
-        JoinStep::Wait
     }
 }
 
@@ -1589,12 +1397,7 @@ impl Node {
         let Phase::Joining(j) = &self.phase else {
             return None;
         };
-        Some(JoiningView {
-            game: &j.key.name,
-            started: j.started,
-            acked: j.acked,
-            has_config: j.cfg.is_some(),
-        })
+        Some(j.view())
     }
 
     /// Только для тестов: изменяемый мир ведущего.
@@ -1810,25 +1613,13 @@ impl Node {
             rng,
         };
         let mut flow = Flow::Continue;
-        let mut joined: Option<Box<Game>> = None;
-        let mut join_failed: Option<String> = None;
+        let mut join_step = JoinStep::Wait;
         match phase {
             Phase::Lobby => {}
-            Phase::Joining(j) => match j.on_message(&mut cx, from, msg) {
-                JoinStep::Wait => {}
-                JoinStep::Done(g) => joined = Some(g),
-                JoinStep::Failed(why) => join_failed = Some(why),
-            },
+            Phase::Joining(j) => join_step = j.on_message(&mut cx, from, msg),
             Phase::InGame(g) => flow = g.on_message(&mut cx, from, msg),
         }
-        if let Some(g) = joined {
-            self.phase = Phase::InGame(g);
-            self.events.push(Event::Joined);
-        }
-        if let Some(why) = join_failed {
-            self.phase = Phase::Lobby;
-            self.events.push(Event::Failure(why));
-        }
+        self.finish_join(join_step);
         self.finish_flow(flow);
         self.after_call();
     }
@@ -1861,16 +1652,14 @@ impl Node {
             ev: events,
             rng,
         };
-        let mut step = JoinStep::Wait;
-        if let Phase::Joining(j) = phase
-            && from == j.key.addr
-            && let Some(g) = games
-                .iter()
-                .find(|g| g.game_name == j.key.name && g.config.is_valid())
-        {
-            j.cfg = Some(g.config);
-            step = j.try_complete(&mut cx);
-        }
+        let step = match phase {
+            Phase::Joining(j) => j.on_announcement(&mut cx, from, games),
+            _ => JoinStep::Wait,
+        };
+        self.finish_join(step);
+    }
+
+    fn finish_join(&mut self, step: JoinStep) {
         match step {
             JoinStep::Wait => {}
             JoinStep::Done(g) => {
@@ -1907,8 +1696,7 @@ impl Node {
             rng,
         };
         let mut flow = Flow::Continue;
-        let mut joined: Option<Box<Game>> = None;
-        let mut join_failed: Option<String> = None;
+        let mut join_step = JoinStep::Wait;
         match phase {
             Phase::Lobby
                 if let Some(srv) = *server
@@ -1919,21 +1707,10 @@ impl Node {
                 *last_discover = Some(now);
             }
             Phase::Lobby => {}
-            Phase::Joining(j) => match j.tick(&mut cx) {
-                JoinStep::Wait => {}
-                JoinStep::Done(g) => joined = Some(g),
-                JoinStep::Failed(why) => join_failed = Some(why),
-            },
+            Phase::Joining(j) => join_step = j.tick(&mut cx),
             Phase::InGame(g) => flow = g.tick(&mut cx),
         }
-        if let Some(g) = joined {
-            self.phase = Phase::InGame(g);
-            self.events.push(Event::Joined);
-        }
-        if let Some(why) = join_failed {
-            self.phase = Phase::Lobby;
-            self.events.push(Event::Failure(why));
-        }
+        self.finish_join(join_step);
 
         // Повторы сообщений о выходе.
         for c in &mut self.closing {
