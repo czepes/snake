@@ -20,6 +20,149 @@ fn tab(ui: &mut Ui, node: &mut Node, now: Instant) {
 }
 
 #[test]
+fn create_form_returns_a_command_without_starting_the_game() {
+    let now = Instant::now();
+    let mut node = Node::new(now, 42, 1);
+    let mut ui = Ui::new("Игрок".into());
+
+    let open = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE);
+    assert!(ui.handle_key(open, &node, now).is_none());
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    let command = ui.handle_key(enter, &node, now).unwrap();
+    assert!(matches!(
+        &command,
+        Command::Host { game, player, cfg }
+            if game == "Игра" && player == "Игрок"
+                && *cfg == (Config { width: 20, height: 15, food_static: 2, state_delay_ms: 300 })
+    ));
+    assert_eq!(node.phase(), PhaseKind::Lobby);
+
+    node.command(now, command);
+    assert_eq!(node.phase(), PhaseKind::InGame);
+}
+
+#[test]
+fn game_keys_return_commands_without_changing_the_session() {
+    let now = Instant::now();
+    let mut node = Node::new(now, 42, 1);
+    host(&mut node, now);
+    let mut ui = Ui::new("Игрок".into());
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+
+    for (code, expected) in [
+        (KeyCode::Up, Dir::Up),
+        (KeyCode::Char('ы'), Dir::Down),
+        (KeyCode::Char('h'), Dir::Left),
+        (KeyCode::Char('Д'), Dir::Right),
+    ] {
+        assert!(
+            matches!(ui.handle_key(key(code), &node, now), Some(Command::Steer(d)) if d == expected)
+        );
+    }
+    assert!(matches!(
+        ui.handle_key(key(KeyCode::Char('v')), &node, now),
+        Some(Command::ToggleWatch)
+    ));
+    assert!(matches!(
+        ui.handle_key(key(KeyCode::Char('r')), &node, now),
+        Some(Command::InviteRobot)
+    ));
+    assert!(matches!(
+        ui.handle_key(key(KeyCode::Esc), &node, now),
+        Some(Command::Leave)
+    ));
+    assert!(matches!(
+        ui.handle_key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &node,
+            now
+        ),
+        Some(Command::Quit)
+    ));
+    assert!(ui.handle_key(key(KeyCode::Tab), &node, now).is_none());
+    assert_eq!(node.game_view().unwrap().status, PlayerStatus::Playing);
+    assert_eq!(node.phase(), PhaseKind::InGame);
+}
+
+#[test]
+fn closed_game_can_still_be_joined_as_a_viewer() {
+    use crate::wire::{Announcement, Body, Message, decode, encode};
+    use std::net::{Ipv4Addr, SocketAddrV4};
+
+    let now = Instant::now();
+    let mut node = Node::new(now, 42, 1);
+    let mut ui = Ui::new("Игрок".into());
+    let address = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 4000);
+    let announcement = Message {
+        seq: 1,
+        sender_id: None,
+        receiver_id: None,
+        game_name: None,
+        body: Body::Announcement(vec![Announcement {
+            game_name: "Занятая игра".into(),
+            config: Config::default(),
+            players: vec![],
+            can_join: false,
+        }]),
+    };
+    node.on_datagram(now, address, true, &encode(&announcement).unwrap());
+
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    assert!(ui.handle_key(key(KeyCode::Enter), &node, now).is_none());
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    terminal.draw(|f| ui.draw(f, &node, now, true)).unwrap();
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(text.contains("Нет места для змейки"));
+
+    let command = ui.handle_key(key(KeyCode::Char('v')), &node, now).unwrap();
+    node.command(now, command);
+    assert_eq!(node.phase(), PhaseKind::Joining);
+    let packets = node.drain_out();
+    let crate::reliable::Out::Unicast(to, bytes) = &packets[0] else {
+        panic!("ожидался unicast Join");
+    };
+    assert_eq!(*to, address);
+    assert!(matches!(
+        decode(bytes).unwrap().body,
+        Body::Join {
+            status: PlayerStatus::Viewing,
+            ..
+        }
+    ));
+
+    let cancel = ui.handle_key(key(KeyCode::Esc), &node, now).unwrap();
+    node.command(now, cancel);
+    assert_eq!(node.phase(), PhaseKind::Lobby);
+}
+
+#[test]
+fn create_on_server_uses_server_command_and_keeps_parameters_independent() {
+    let now = Instant::now();
+    let mut node = Node::new(now, 42, 1);
+    let mut ui = Ui::new("Игрок".into());
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    node.set_server(Some("127.0.0.1:9193".parse().unwrap()));
+
+    assert!(ui.handle_key(key(KeyCode::Char('c')), &node, now).is_none());
+    for _ in 0..5 {
+        assert!(ui.handle_key(key(KeyCode::Tab), &node, now).is_none());
+    }
+    assert!(ui.handle_key(key(KeyCode::Char(' ')), &node, now).is_none());
+    let command = ui.handle_key(key(KeyCode::Enter), &node, now).unwrap();
+    assert!(
+        matches!(&command, Command::HostOnServer { game, player } if game == "Игра" && player == "Игрок")
+    );
+    node.command(now, command);
+    assert_eq!(node.phase(), PhaseKind::Joining);
+}
+
+#[test]
 fn game_controls_follow_player_status_and_role() {
     let now = Instant::now();
     let mut node = Node::new(now, 42, 1);

@@ -157,71 +157,84 @@ impl Ui {
 
     // ───────────────────────────── Ввод ──────────────────────────────────────
 
-    /// Маршрутизирует клавишу по фазе узла; формы обрабатываются только в лобби.
-    /// Ctrl+C запрашивает штатный выход, а не прерывает процесс посреди передачи роли.
-    pub fn on_key(&mut self, key: KeyEvent, node: &mut Node, now: Instant) {
+    /// Обрабатывает клавишу и возвращает команду для узла, не изменяя его.
+    /// Ctrl+C запрашивает штатный выход, а не прерывает передачу роли.
+    pub fn handle_key(&mut self, key: KeyEvent, node: &Node, now: Instant) -> Option<Command> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
-            node.command(now, Command::Quit);
-            return;
+            return Some(Command::Quit);
         }
         match node.phase() {
-            PhaseKind::InGame => self.key_game(key, node, now),
-            PhaseKind::Joining => {
-                if matches!(
-                    key.code,
-                    KeyCode::Esc | KeyCode::Char('q' | 'Q' | 'й' | 'Й')
-                ) {
-                    node.command(now, Command::Leave);
-                }
-            }
+            PhaseKind::InGame => self.key_game(key),
+            PhaseKind::Joining => matches!(
+                key.code,
+                KeyCode::Esc | KeyCode::Char('q' | 'Q' | 'й' | 'Й')
+            )
+            .then_some(Command::Leave),
             PhaseKind::Lobby => match self.screen {
                 Screen::Lobby => self.key_lobby(key, node, now),
-                Screen::Create => self.key_create(key, node, now),
-                Screen::EditName => self.key_name(key, now),
+                Screen::Create => self.key_create(key),
+                Screen::EditName => {
+                    self.key_name(key, now);
+                    None
+                }
             },
         }
     }
 
-    fn key_game(&mut self, key: KeyEvent, node: &mut Node, now: Instant) {
+    /// Обрабатывает клавишу и сразу передаёт полученную команду узлу.
+    pub fn on_key(&mut self, key: KeyEvent, node: &mut Node, now: Instant) {
+        if let Some(command) = self.handle_key(key, node, now) {
+            node.command(now, command);
+        }
+    }
 
+    fn key_game(&mut self, key: KeyEvent) -> Option<Command> {
         let steer = match key.code {
-            KeyCode::Up | KeyCode::Char('w' | 'W' | 'ц' | 'Ц' | 'k' | 'K' | 'л' | 'Л') => Some(Dir::Up),
-            KeyCode::Down | KeyCode::Char('s' | 'S' | 'ы' | 'Ы' | 'j' | 'J' | 'о' | 'О') => Some(Dir::Down),
-            KeyCode::Left | KeyCode::Char('a' | 'A' | 'ф' | 'Ф' | 'h' | 'H' | 'р' | 'Р') => Some(Dir::Left),
-            KeyCode::Right | KeyCode::Char('d' | 'D' | 'в' | 'В' | 'l' | 'L' | 'д' | 'Д') => Some(Dir::Right),
+            KeyCode::Up | KeyCode::Char('w' | 'W' | 'ц' | 'Ц' | 'k' | 'K' | 'л' | 'Л') => {
+                Some(Dir::Up)
+            }
+            KeyCode::Down | KeyCode::Char('s' | 'S' | 'ы' | 'Ы' | 'j' | 'J' | 'о' | 'О') => {
+                Some(Dir::Down)
+            }
+            KeyCode::Left | KeyCode::Char('a' | 'A' | 'ф' | 'Ф' | 'h' | 'H' | 'р' | 'Р') => {
+                Some(Dir::Left)
+            }
+            KeyCode::Right | KeyCode::Char('d' | 'D' | 'в' | 'В' | 'l' | 'L' | 'д' | 'Д') => {
+                Some(Dir::Right)
+            }
             _ => None,
         };
         if let Some(d) = steer {
-            node.command(now, Command::Steer(d));
-            return;
+            return Some(Command::Steer(d));
         }
         match key.code {
             KeyCode::Tab => self.palette_offset = (self.palette_offset + 1) % PALETTE.len(),
             KeyCode::Char('e' | 'E' | 'у' | 'У') => self.show_direction = !self.show_direction,
             KeyCode::Char('b' | 'B' | 'и' | 'И') => self.animations.toggle_boom(),
-            KeyCode::Char('v' | 'V' | 'м' | 'М') => node.command(now, Command::ToggleWatch),
-            KeyCode::Char('r' | 'R' | 'к' | 'К') => node.command(now, Command::InviteRobot),
-            KeyCode::Esc | KeyCode::Char('q' | 'Q' | 'й' | 'Й') => {
-                node.command(now, Command::Leave)
-            }
+            KeyCode::Char('v' | 'V' | 'м' | 'М') => return Some(Command::ToggleWatch),
+            KeyCode::Char('r' | 'R' | 'к' | 'К') => return Some(Command::InviteRobot),
+            KeyCode::Esc | KeyCode::Char('q' | 'Q' | 'й' | 'Й') => return Some(Command::Leave),
             _ => {}
         }
+        None
     }
 
-    fn key_lobby(&mut self, key: KeyEvent, node: &mut Node, now: Instant) {
+    fn key_lobby(&mut self, key: KeyEvent, node: &Node, now: Instant) -> Option<Command> {
         let count = node.catalog_entries().len();
         match key.code {
-            KeyCode::Up | KeyCode::Char('k' | 'K' | 'л' | 'Л') => self.selected = self.selected.saturating_sub(1),
+            KeyCode::Up | KeyCode::Char('k' | 'K' | 'л' | 'Л') => {
+                self.selected = self.selected.saturating_sub(1)
+            }
             KeyCode::Down | KeyCode::Char('j' | 'J' | 'о' | 'О') => {
                 if self.selected + 1 < count {
                     self.selected += 1;
                 }
             }
             KeyCode::Enter | KeyCode::Char('p' | 'P' | 'з' | 'З' | 'l' | 'L' | 'д' | 'Д') => {
-                self.join(node, now, PlayerStatus::Playing)
+                return self.join(node, now, PlayerStatus::Playing);
             }
             KeyCode::Char('v' | 'V' | 'м' | 'М' | 'h' | 'H' | 'р' | 'Р') => {
-                self.join(node, now, PlayerStatus::Viewing)
+                return self.join(node, now, PlayerStatus::Viewing);
             }
             KeyCode::Char('c' | 'C' | 'с' | 'С') => {
                 self.form.error = None;
@@ -231,14 +244,13 @@ impl Ui {
                 self.name_buf = self.player_name.clone();
                 self.screen = Screen::EditName;
             }
-            KeyCode::Esc | KeyCode::Char('q' | 'Q' | 'й' | 'Й') => {
-                node.command(now, Command::Quit)
-            }
+            KeyCode::Esc | KeyCode::Char('q' | 'Q' | 'й' | 'Й') => return Some(Command::Quit),
             _ => {}
         }
+        None
     }
 
-    fn join(&mut self, node: &mut Node, now: Instant, status: PlayerStatus) {
+    fn join(&mut self, node: &Node, now: Instant, status: PlayerStatus) -> Option<Command> {
         let (key, can_play, can_watch) = {
             let entries = node.catalog_entries();
             let Some(e) = entries.get(self.selected) else {
@@ -247,13 +259,13 @@ impl Ui {
                     "Выберите игру из списка (она появится, когда будет найдена)",
                     true,
                 );
-                return;
+                return None;
             };
             (e.key.clone(), e.can_play(), e.can_watch())
         };
         if !valid_player_name(&self.player_name) {
             self.say(now, "Задайте имя игрока: клавиша N", true);
-            return;
+            return None;
         }
         let ok = if status == PlayerStatus::Playing {
             can_play
@@ -267,16 +279,13 @@ impl Ui {
                 "В игре нет свободных мест"
             };
             self.say(now, why, true);
-            return;
+            return None;
         }
-        node.command(
-            now,
-            Command::Join {
-                key,
-                player: self.player_name.clone(),
-                status,
-            },
-        );
+        Some(Command::Join {
+            key,
+            player: self.player_name.clone(),
+            status,
+        })
     }
 
     fn key_name(&mut self, key: KeyEvent, now: Instant) {
@@ -300,7 +309,7 @@ impl Ui {
         }
     }
 
-    fn key_create(&mut self, key: KeyEvent, node: &mut Node, now: Instant) {
+    fn key_create(&mut self, key: KeyEvent) -> Option<Command> {
         const FIELDS: usize = 6;
         let f = &mut self.form;
         match key.code {
@@ -311,7 +320,7 @@ impl Ui {
             KeyCode::BackTab | KeyCode::Up | KeyCode::Char('k' | 'K') => {
                 f.field = (f.field + FIELDS - 1) % FIELDS
             }
-            KeyCode::Enter => self.submit_form(node, now),
+            KeyCode::Enter => return self.submit_form(),
             KeyCode::Backspace => {
                 match f.field {
                     0 => f.game.pop(),
@@ -341,28 +350,25 @@ impl Ui {
             },
             _ => {}
         }
+        None
     }
 
-    fn submit_form(&mut self, node: &mut Node, now: Instant) {
+    fn submit_form(&mut self) -> Option<Command> {
         let game = self.form.game.trim().to_owned();
         if !valid_game_name(&game) {
             self.form.error = Some("Имя игры: от 1 до 32 байт".into());
-            return;
+            return None;
         }
         if !valid_player_name(&self.player_name) {
             self.form.error = Some("Сначала задайте имя игрока (в лобби — клавиша N)".into());
-            return;
+            return None;
         }
         if self.form.on_server {
-            node.command(
-                now,
-                Command::HostOnServer {
-                    game,
-                    player: self.player_name.clone(),
-                },
-            );
             self.screen = Screen::Lobby;
-            return;
+            return Some(Command::HostOnServer {
+                game,
+                player: self.player_name.clone(),
+            });
         }
         let parse = |s: &str| s.parse::<i32>().unwrap_or(-1);
         let cfg = Config {
@@ -373,17 +379,14 @@ impl Ui {
         };
         if !cfg.is_valid() {
             self.form.error = Some("Ширина и высота: 10–100, еда: 0–10, ход: 100–3000 мс".into());
-            return;
+            return None;
         }
-        node.command(
-            now,
-            Command::Host {
-                game,
-                player: self.player_name.clone(),
-                cfg,
-            },
-        );
         self.screen = Screen::Lobby;
+        Some(Command::Host {
+            game,
+            player: self.player_name.clone(),
+            cfg,
+        })
     }
 
     fn min_size(&self, node: &Node) -> (u16, u16, &'static str) {

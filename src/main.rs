@@ -159,7 +159,9 @@ fn main() -> ExitCode {
                 timeout = Duration::ZERO;
                 match event::read()? {
                     TermEvent::Key(k) if k.kind != KeyEventKind::Release => {
-                        ui.on_key(k, &mut node, now);
+                        if let Some(command) = ui.handle_key(k, &node, now) {
+                            node.command(now, command);
+                        }
                         dirty = true;
                     }
                     TermEvent::Resize(..) => dirty = true,

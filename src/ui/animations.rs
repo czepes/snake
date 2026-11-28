@@ -226,7 +226,7 @@ impl Animations {
         }
     }
 
-    pub (super) fn toggle_boom(&mut self) {
+    pub(super) fn toggle_boom(&mut self) {
         if let Some(state) = &mut self.state {
             state.boom = !state.boom;
         }
