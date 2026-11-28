@@ -196,11 +196,10 @@ fn tab_recolors_board_and_player_swatch_with_or_without_animations() {
         let mut ui = Ui::with_animations("Игрок".into(), enabled);
         let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
         terminal.draw(|f| ui.draw(f, &node, now, false)).unwrap();
-        for offset in 0..PALETTE.len() {
+        for &color in &PALETTE {
             let at = now + Duration::from_secs(2);
             terminal.draw(|f| ui.draw(f, &node, at, false)).unwrap();
             let buffer = terminal.backend().buffer();
-            let color = PALETTE[offset];
             assert!(buffer.content.iter().any(|cell| cell.bg == color));
             let swatch = buffer
                 .content

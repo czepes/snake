@@ -93,6 +93,7 @@ pub struct Ui {
     msg: Option<Msg>,
     /// Общий локальный сдвиг сохраняет различие цветов участников.
     palette_offset: usize,
+    show_direction: bool,
     animations: Animations,
 }
 
@@ -112,6 +113,7 @@ impl Ui {
             name_buf: String::new(),
             msg: None,
             palette_offset: 0,
+            show_direction: false,
             animations: Animations::new(enabled),
         }
     }
@@ -119,6 +121,12 @@ impl Ui {
     #[doc(hidden)]
     pub fn with_boom(mut self, enabled: bool) -> Self {
         self.animations.set_boom(enabled);
+        self
+    }
+
+    /// Показывать направление движения в символе головы змейки.
+    pub fn with_direction(mut self, enabled: bool) -> Self {
+        self.show_direction = enabled;
         self
     }
 
@@ -175,11 +183,12 @@ impl Ui {
     }
 
     fn key_game(&mut self, key: KeyEvent, node: &mut Node, now: Instant) {
+
         let steer = match key.code {
-            KeyCode::Up | KeyCode::Char('w' | 'W' | 'ц' | 'Ц' | 'k' | 'K') => Some(Dir::Up),
-            KeyCode::Down | KeyCode::Char('s' | 'S' | 'ы' | 'Ы' | 'j' | 'J') => Some(Dir::Down),
-            KeyCode::Left | KeyCode::Char('a' | 'A' | 'ф' | 'Ф' | 'h' | 'H') => Some(Dir::Left),
-            KeyCode::Right | KeyCode::Char('d' | 'D' | 'в' | 'В' | 'l' | 'L') => Some(Dir::Right),
+            KeyCode::Up | KeyCode::Char('w' | 'W' | 'ц' | 'Ц' | 'k' | 'K' | 'л' | 'Л') => Some(Dir::Up),
+            KeyCode::Down | KeyCode::Char('s' | 'S' | 'ы' | 'Ы' | 'j' | 'J' | 'о' | 'О') => Some(Dir::Down),
+            KeyCode::Left | KeyCode::Char('a' | 'A' | 'ф' | 'Ф' | 'h' | 'H' | 'р' | 'Р') => Some(Dir::Left),
+            KeyCode::Right | KeyCode::Char('d' | 'D' | 'в' | 'В' | 'l' | 'L' | 'д' | 'Д') => Some(Dir::Right),
             _ => None,
         };
         if let Some(d) = steer {
@@ -188,6 +197,8 @@ impl Ui {
         }
         match key.code {
             KeyCode::Tab => self.palette_offset = (self.palette_offset + 1) % PALETTE.len(),
+            KeyCode::Char('e' | 'E' | 'у' | 'У') => self.show_direction = !self.show_direction,
+            KeyCode::Char('b' | 'B' | 'и' | 'И') => self.animations.toggle_boom(),
             KeyCode::Char('v' | 'V' | 'м' | 'М') => node.command(now, Command::ToggleWatch),
             KeyCode::Char('r' | 'R' | 'к' | 'К') => node.command(now, Command::InviteRobot),
             KeyCode::Esc | KeyCode::Char('q' | 'Q' | 'й' | 'Й') => {
@@ -200,16 +211,16 @@ impl Ui {
     fn key_lobby(&mut self, key: KeyEvent, node: &mut Node, now: Instant) {
         let count = node.catalog_entries().len();
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Up | KeyCode::Char('k' | 'K' | 'л' | 'Л') => self.selected = self.selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j' | 'J' | 'о' | 'О') => {
                 if self.selected + 1 < count {
                     self.selected += 1;
                 }
             }
-            KeyCode::Enter | KeyCode::Char('p' | 'P' | 'з' | 'З' | 'l' | 'L') => {
+            KeyCode::Enter | KeyCode::Char('p' | 'P' | 'з' | 'З' | 'l' | 'L' | 'д' | 'Д') => {
                 self.join(node, now, PlayerStatus::Playing)
             }
-            KeyCode::Char('v' | 'V' | 'м' | 'М' | 'h' | 'H') => {
+            KeyCode::Char('v' | 'V' | 'м' | 'М' | 'h' | 'H' | 'р' | 'Р') => {
                 self.join(node, now, PlayerStatus::Viewing)
             }
             KeyCode::Char('c' | 'C' | 'с' | 'С') => {
@@ -801,11 +812,11 @@ impl Ui {
         let ox = ((focus.0 as usize).saturating_sub(vw / 2)).min(w - vw);
         let oy = ((focus.1 as usize).saturating_sub(vh / 2)).min(h - vh);
 
-        let mut occ: HashMap<(i32, i32), (Color, bool)> = HashMap::new();
+        let mut occ: HashMap<(i32, i32), (Color, Option<Dir>)> = HashMap::new();
         for s in &v.world.snakes {
             let color = player_color(v, s.owner, self.palette_offset);
             for (i, &c) in s.cells.iter().enumerate() {
-                occ.insert(c, (color, i == 0));
+                occ.insert(c, (color, (i == 0).then_some(s.dir)));
             }
         }
 
@@ -818,16 +829,20 @@ impl Ui {
                 let cell = (x as i32, y as i32);
                 let span = if let Some(&(color, head)) = occ.get(&cell) {
                     match (head, cw) {
-                        (true, 2) => Span::styled(
+                        (Some(dir), _) if self.show_direction => Span::styled(
+                            head_symbol(dir, cw),
+                            Style::new().bg(color).fg(Color::Black),
+                        ),
+                        (Some(_), 2) => Span::styled(
                             "••",
                             Style::new()
                                 .bg(color)
                                 .fg(Color::Black)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        (true, _) => Span::styled("●", Style::new().bg(color).fg(Color::Black)),
-                        (false, 2) => Span::styled("  ", Style::new().bg(color)),
-                        (false, _) => Span::styled("█", Style::new().fg(color)),
+                        (Some(_), _) => Span::styled("●", Style::new().bg(color).fg(Color::Black)),
+                        (None, 2) => Span::styled("  ", Style::new().bg(color)),
+                        (None, _) => Span::styled("█", Style::new().fg(color)),
                     }
                 } else if foods.contains(&cell) {
                     Span::styled(
@@ -955,6 +970,7 @@ fn game_controls(v: &GameView) -> Vec<Line<'static>> {
         PlayerStatus::Playing => "[V] наблюдать",
         PlayerStatus::Viewing => "[V] играть, если есть место",
     }));
+    controls.push(Line::from("[E] отобразить направление змеек"));
     controls.push(Line::from("[Tab] сменить цвета"));
     if v.role == NodeRole::Master {
         controls.push(Line::from("[R] пригласить робота с сервера"));
@@ -962,6 +978,18 @@ fn game_controls(v: &GameView) -> Vec<Line<'static>> {
     controls.push(Line::from("[Q] / Esc — выйти в лобби"));
     controls.push(Line::from("Ctrl+C — закрыть приложение"));
     controls
+}
+
+fn head_symbol(dir: Dir, cell_width: usize) -> &'static str {
+    match (dir, cell_width) {
+        (Dir::Up, 2) => "˙˙",
+        (Dir::Down, 2) => "..",
+        (Dir::Left, 2) => ": ",
+        (Dir::Right, 2) => " :",
+        (Dir::Up, _) => "˙",
+        (Dir::Down, _) => ".",
+        (Dir::Left, _) | (Dir::Right, _) => ":",
+    }
 }
 
 fn player_color_index(v: &GameView, id: i32) -> usize {

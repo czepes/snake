@@ -29,6 +29,7 @@ const HELP: &str = "\
   --no-server         не обращаться к серверу курса
   --no-multicast      не использовать multicast (только сервер и прямые адреса)
   --no-animations     отключить все анимации интерфейса
+  --direction         показывать направление головы змейки
   --port ПОРТ         фиксированный UDP-порт игрового сокета (по умолчанию выбирает ОС)
   --log ФАЙЛ          писать журнал протокола в файл (или переменная $SNAKE_LOG)
   -h, --help          эта справка
@@ -38,6 +39,7 @@ struct Args {
     server: Option<String>,
     multicast: bool,
     animations: bool,
+    direction: bool,
     boom: bool,
     port: Option<u16>,
     name: String,
@@ -55,6 +57,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Option<Args
         server: Some(DEFAULT_SERVER.to_owned()),
         multicast: true,
         animations: true,
+        direction: false,
         boom: false,
         port: None,
         name: std::env::var("SNAKE_NAME")
@@ -73,6 +76,7 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Result<Option<Args
             "--no-server" => a.server = None,
             "--no-multicast" => a.multicast = false,
             "--no-animations" => a.animations = false,
+            "--direction" => a.direction = true,
             "--boom" => a.boom = true,
             "--server" => a.server = Some(value("host:port")?),
             "--name" => a.name = value("имя")?,
@@ -136,8 +140,9 @@ fn main() -> ExitCode {
     node.set_trace(log.is_some());
 
     let resolver = args.server.clone().map(spawn_resolver);
-    let mut ui =
-        Ui::with_animations(args.name.trim().to_owned(), args.animations).with_boom(args.boom);
+    let mut ui = Ui::with_animations(args.name.trim().to_owned(), args.animations)
+        .with_boom(args.boom)
+        .with_direction(args.direction);
 
     let mut terminal = ratatui::init();
     let mut last_draw = start - Duration::from_secs(1);
@@ -263,6 +268,24 @@ mod tests {
         let args = parse_args_from(args.map(str::to_owned)).unwrap().unwrap();
         assert!(!args.animations && !args.multicast && args.server.is_none());
         assert_eq!(args.name, "Игрок");
+    }
+
+    #[test]
+    fn direction_is_opt_in_and_compatible_with_animation_options() {
+        assert!(!parse_args_from(Vec::new()).unwrap().unwrap().direction);
+        for flags in [
+            ["--direction", "--no-animations"],
+            ["--no-animations", "--direction"],
+        ] {
+            let args = parse_args_from(flags.map(str::to_owned)).unwrap().unwrap();
+            assert!(args.direction);
+            assert!(!args.animations);
+        }
+        let args = parse_args_from(["--direction"].map(str::to_owned))
+            .unwrap()
+            .unwrap();
+        assert!(args.direction && args.animations);
+        assert!(HELP.contains("--direction"));
     }
 
     #[test]

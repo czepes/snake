@@ -226,6 +226,12 @@ impl Animations {
         }
     }
 
+    pub (super) fn toggle_boom(&mut self) {
+        if let Some(state) = &mut self.state {
+            state.boom = !state.boom;
+        }
+    }
+
     pub(super) fn set_boom(&mut self, enabled: bool) {
         if let Some(state) = &mut self.state {
             state.boom = enabled;

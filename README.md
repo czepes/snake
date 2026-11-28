@@ -8,6 +8,7 @@
     cargo run --release                       # обычный запуск
     cargo run --release -- --name Вася        # своё имя
     cargo run --release -- --no-animations    # без анимаций интерфейса
+    cargo run --release -- --direction        # показывать направление головы змейки
     cargo run --release -- --no-server        # только локальная сеть
     cargo run --release -- --no-multicast --server 127.0.0.1:45101   # только «сервер» (проверка unicast-пути)
     cargo run --release -- --port 45101       # фиксированный порт игрового сокета
