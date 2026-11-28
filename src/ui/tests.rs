@@ -85,6 +85,40 @@ fn game_keys_return_commands_without_changing_the_session() {
 }
 
 #[test]
+fn joining_screen_shows_the_separate_recovery_timer() {
+    use crate::catalog::GameKey;
+
+    let now = Instant::now();
+    let mut node = Node::new(now, 42, 1);
+    node.command(
+        now,
+        Command::Join {
+            key: GameKey {
+                name: "test".into(),
+                addr: "127.0.0.1:4000".parse().unwrap(),
+            },
+            player: "Игрок".into(),
+            status: PlayerStatus::Viewing,
+        },
+    );
+    node.on_tick(now + Duration::from_secs(5));
+    let mut ui = Ui::with_animations("Игрок".into(), false);
+    let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+    terminal
+        .draw(|f| ui.draw(f, &node, now + Duration::from_millis(5500), true))
+        .unwrap();
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(text.contains("Поиск нового ведущего"), "{text}");
+    assert!(text.contains("Прошло 0.5 с из 3"), "{text}");
+}
+
+#[test]
 fn closed_game_can_still_be_joined_as_a_viewer() {
     use crate::wire::{Announcement, Body, Message, decode, encode};
     use std::net::{Ipv4Addr, SocketAddrV4};

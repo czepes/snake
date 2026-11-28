@@ -113,6 +113,7 @@ pub struct GameView<'a> {
 pub struct JoiningView<'a> {
     pub game: &'a str,
     pub started: Instant,
+    pub recovering: bool,
     pub acked: bool,
     pub has_config: bool,
 }
@@ -1750,7 +1751,7 @@ impl Node {
                 *last_discover = Some(now);
             }
             Phase::Lobby => {}
-            Phase::Joining(j) => join_step = j.tick(&mut cx),
+            Phase::Joining(j) => join_step = j.tick(&mut cx, *server),
             Phase::InGame(g) => flow = g.tick(&mut cx),
         }
         self.finish_join(join_step);

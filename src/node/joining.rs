@@ -10,14 +10,17 @@ use crate::wire::{
 };
 
 use super::{
-    Ctx, Game, JOIN_DEADLINE, JOIN_DISCOVER_PERIOD, JoiningView, MasterState, accept_request, mk,
-    validate_state,
+    Ctx, DISCOVER_PERIOD, Game, JOIN_DEADLINE, JOIN_DISCOVER_PERIOD, JoiningView, MasterState,
+    accept_request, mk, validate_state,
 };
 
 /// Независимо собирает подтверждение регистрации, конфиг и самый новый State.
 /// Отсутствие конфига не мешает подтверждать пакеты и повторять Join.
 pub(super) struct Joining {
     key: GameKey,
+    player: String,
+    status: PlayerStatus,
+    stage: Stage,
     started: Instant,
     join_seq: i64,
     cfg: Option<Config>,
@@ -27,7 +30,15 @@ pub(super) struct Joining {
     master_id: Option<i32>,
     buffered: Option<(StateMsg, Option<i32>)>,
     last_discover: Instant,
+    last_search_discover: Option<Instant>,
     rel: Reliable,
+}
+
+const SEARCH_DEADLINE: Duration = Duration::from_secs(3);
+
+enum Stage {
+    Attempt,
+    Searching { since: Instant, reason: String },
 }
 
 pub(super) enum JoinStep {
@@ -52,7 +63,7 @@ impl Joining {
             Some(&key.name),
             Body::Join {
                 ptype: PlayerType::Human,
-                player_name: player,
+                player_name: player.clone(),
                 game_name: key.name.clone(),
                 status,
             },
@@ -60,6 +71,9 @@ impl Joining {
         let sent = rel.send_request(cx.ob, cx.now, key.addr, Kind::Control, join)?;
         Some(Joining {
             key,
+            player,
+            status,
+            stage: Stage::Attempt,
             started: cx.now,
             join_seq: sent.seq,
             cfg,
@@ -69,16 +83,22 @@ impl Joining {
             master_id: None,
             buffered: None,
             last_discover: cx.now,
+            last_search_discover: None,
             rel,
         })
     }
 
     pub(super) fn view(&self) -> JoiningView<'_> {
+        let (started, recovering) = match self.stage {
+            Stage::Attempt => (self.started, false),
+            Stage::Searching { since, .. } => (since, true),
+        };
         JoiningView {
             game: &self.key.name,
-            started: self.started,
-            acked: self.acked,
-            has_config: self.cfg.is_some(),
+            started,
+            recovering,
+            acked: !recovering && self.acked,
+            has_config: !recovering && self.cfg.is_some(),
         }
     }
 
@@ -88,15 +108,80 @@ impl Joining {
         from: SocketAddrV4,
         games: &[Announcement],
     ) -> JoinStep {
-        if from == self.key.addr
-            && let Some(g) = games
-                .iter()
-                .find(|g| g.game_name == self.key.name && g.config.is_valid())
-        {
-            self.cfg = Some(g.config);
-            return self.try_complete(cx);
+        if let Some(step) = self.expire(cx) {
+            return step;
         }
-        JoinStep::Wait
+        let Some(game) = games
+            .iter()
+            .find(|g| g.game_name == self.key.name && g.config.is_valid())
+        else {
+            return JoinStep::Wait;
+        };
+        match self.stage {
+            Stage::Attempt if from == self.key.addr => {
+                self.cfg = Some(game.config);
+                self.try_complete(cx)
+            }
+            Stage::Searching { .. } if from != self.key.addr => {
+                let key = GameKey {
+                    name: self.key.name.clone(),
+                    addr: from,
+                };
+                if let Some(joining) =
+                    Self::start(cx, key, self.player.clone(), self.status, Some(game.config))
+                {
+                    *self = joining;
+                    cx.notice("Найден новый ведущий; повторяем подключение");
+                }
+                JoinStep::Wait
+            }
+            _ => JoinStep::Wait,
+        }
+    }
+
+    fn search(&mut self, cx: &mut Ctx) {
+        self.stage = Stage::Searching {
+            since: cx.now,
+            reason: self.failure_reason(),
+        };
+        self.rel = Reliable::new();
+        self.buffered = None;
+        self.last_search_discover = None;
+        cx.notice("Ведущий не отвечает; ищем новый анонс игры");
+    }
+
+    fn expire(&mut self, cx: &mut Ctx) -> Option<JoinStep> {
+        match &self.stage {
+            Stage::Searching { since, reason }
+                if cx.now.duration_since(*since) >= SEARCH_DEADLINE =>
+            {
+                Some(JoinStep::Failed(format!(
+                    "{reason}; новый анонс игры не найден за 3 секунды"
+                )))
+            }
+            Stage::Attempt if cx.now.duration_since(self.started) >= JOIN_DEADLINE => {
+                if self.acked {
+                    Some(JoinStep::Failed(self.failure_reason()))
+                } else {
+                    self.search(cx);
+                    Some(JoinStep::Wait)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn discover_candidates(&mut self, cx: &mut Ctx, server: Option<SocketAddrV4>) {
+        if let Some(server) = server
+            && self
+                .last_search_discover
+                .is_none_or(|last| cx.now.duration_since(last) >= DISCOVER_PERIOD)
+            && let Some(seq) = cx.ob.seq()
+        {
+            cx.ob
+                .unicast(server, &mk(seq, None, None, None, Body::Discover));
+            self.last_search_discover = Some(cx.now);
+        }
     }
 
     fn failure_reason(&self) -> String {
@@ -116,11 +201,29 @@ impl Joining {
         from: SocketAddrV4,
         msg: Message,
     ) -> JoinStep {
-        if !self.matches_message(from, &msg) {
+        if let Some(step) = self.expire(cx) {
+            return step;
+        }
+        if !matches!(self.stage, Stage::Attempt) || !self.matches_message(from, &msg) {
             return JoinStep::Wait;
         }
         let name = self.key.name.clone();
         let my_id = self.my_id.or(self.early_id);
+        if (self.acked || !matches!(msg.body, Body::Ack))
+            && (self
+                .master_id
+                .zip(msg.sender_id)
+                .is_some_and(|(a, b)| a != b)
+                || my_id.zip(msg.receiver_id).is_some_and(|(a, b)| a != b))
+        {
+            return JoinStep::Wait;
+        }
+        if matches!(
+            msg.body,
+            Body::State(_) | Body::Ping | Body::RoleChange { .. } | Body::Error { .. }
+        ) {
+            self.rel.touch(from, cx.now);
+        }
         match msg.body {
             Body::Ack => {
                 if let Some(why) = self.on_ack(cx, from, &msg) {
@@ -138,7 +241,15 @@ impl Joining {
             }
             Body::State(ref s) => self.on_state(cx, from, &msg, s),
             Body::Ping | Body::RoleChange { .. } => {
-                accept_request(&mut self.rel, cx, from, &msg, my_id, self.master_id, &name);
+                accept_request(
+                    &mut self.rel,
+                    cx,
+                    from,
+                    &msg,
+                    my_id.or(msg.receiver_id),
+                    self.master_id.or(msg.sender_id),
+                    &name,
+                );
             }
             _ => {}
         }
@@ -161,19 +272,22 @@ impl Joining {
             self.acked = true;
             self.my_id = msg.receiver_id.or(self.early_id);
             self.master_id = msg.sender_id;
+            let link = self.rel.link(from, cx.now);
+            link.peer_id = self.master_id;
+            link.ping = true;
         }
         None
     }
 
     fn on_state(&mut self, cx: &mut Ctx, from: SocketAddrV4, msg: &Message, state: &StateMsg) {
-        let my_id = self.my_id.or(self.early_id);
+        let my_id = self.my_id.or(self.early_id).or(msg.receiver_id);
         if accept_request(
             &mut self.rel,
             cx,
             from,
             msg,
             my_id,
-            self.master_id,
+            self.master_id.or(msg.sender_id),
             &self.key.name,
         ) {
             self.early_id = self.early_id.or(msg.receiver_id);
@@ -222,8 +336,6 @@ impl Joining {
         let link = rel.link(self.key.addr, cx.now);
         link.peer_id = master_id;
         link.ping = true;
-        link.last_rx = cx.now;
-        link.last_tx = cx.now;
         let delay = Duration::from_millis(cfg.state_delay_ms as u64);
         JoinStep::Done(Box::new(Game {
             name: self.key.name.clone(),
@@ -242,8 +354,26 @@ impl Joining {
         }))
     }
 
-    pub(super) fn tick(&mut self, cx: &mut Ctx) -> JoinStep {
-        self.rel.tick(cx.ob, cx.now, &self.key.name, self.my_id);
+    pub(super) fn tick(&mut self, cx: &mut Ctx, server: Option<SocketAddrV4>) -> JoinStep {
+        if matches!(self.stage, Stage::Searching { .. }) {
+            if let Some(step) = self.expire(cx) {
+                return step;
+            }
+            self.discover_candidates(cx, server);
+            return JoinStep::Wait;
+        }
+        let dead = self.rel.tick(cx.ob, cx.now, &self.key.name, self.my_id);
+        if self.acked && dead.contains(&self.key.addr) {
+            self.search(cx);
+            self.discover_candidates(cx, server);
+            return JoinStep::Wait;
+        }
+        if let Some(step) = self.expire(cx) {
+            if matches!(self.stage, Stage::Searching { .. }) {
+                self.discover_candidates(cx, server);
+            }
+            return step;
+        }
         if self.cfg.is_none()
             && self.acked
             && cx.now.duration_since(self.last_discover) >= JOIN_DISCOVER_PERIOD
@@ -252,9 +382,6 @@ impl Joining {
             let m = mk(seq, None, None, None, Body::Discover);
             cx.ob.unicast(self.key.addr, &m);
             self.last_discover = cx.now;
-        }
-        if cx.now.duration_since(self.started) >= JOIN_DEADLINE {
-            return JoinStep::Failed(self.failure_reason());
         }
         JoinStep::Wait
     }

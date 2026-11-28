@@ -738,7 +738,9 @@ impl Ui {
     fn draw_joining(&self, f: &mut Frame, node: &Node, now: Instant) {
         let area = centered(f.area(), 62, 8);
         let Some(j) = node.joining_view() else { return };
-        let step = if !j.acked {
+        let step = if j.recovering {
+            "Поиск нового ведущего…"
+        } else if !j.acked {
             "1/3 ожидание подтверждения от ведущего (ACK)…"
         } else if !j.has_config {
             "2/3 получение параметров игры…"
@@ -751,7 +753,10 @@ impl Ui {
                 Line::from(format!("Подключение к «{}»", j.game)),
                 Line::from(""),
                 Line::from(step),
-                Line::from(format!("Прошло {secs:.1} с из 5")),
+                Line::from(format!(
+                    "Прошло {secs:.1} с из {}",
+                    if j.recovering { 3 } else { 5 }
+                )),
                 Line::from(""),
                 Line::from(Span::styled(
                     "Esc — отмена",
