@@ -847,6 +847,153 @@ fn acknowledged_join_restarts_cleanly_after_master_timeout() {
 }
 
 #[test]
+fn joining_rejects_mismatched_ids_after_ack_and_does_not_accept_a_forged_ack() {
+    let now = Instant::now();
+    let mut client = Node::new(now, 1, 1);
+    client.set_server(Some(addr_of(0)));
+    client.command(
+        now,
+        Command::HostOnServer {
+            game: "g".into(),
+            player: "client".into(),
+        },
+    );
+    let join = client
+        .drain_out()
+        .into_iter()
+        .find_map(|out| match out {
+            Out::Unicast(_, bytes) => Some(decode(&bytes).unwrap()),
+            _ => None,
+        })
+        .unwrap();
+    let ack = Message {
+        seq: join.seq,
+        sender_id: Some(1),
+        receiver_id: Some(2),
+        game_name: Some("g".into()),
+        body: Body::Ack,
+    };
+    client.on_datagram(now, addr_of(0), false, &encode(&ack).unwrap());
+    for (seq, sender, receiver) in [(50, 9, 2), (51, 1, 9)] {
+        let ping = Message {
+            seq,
+            sender_id: Some(sender),
+            receiver_id: Some(receiver),
+            game_name: Some("g".into()),
+            body: Body::Ping,
+        };
+        client.on_datagram(now, addr_of(0), false, &encode(&ping).unwrap());
+    }
+    assert!(
+        client.drain_out().is_empty(),
+        "неверные ID не подтверждаются"
+    );
+    client.on_tick(now + Duration::from_millis(100));
+    let ping = client
+        .drain_out()
+        .into_iter()
+        .find_map(|out| match out {
+            Out::Unicast(_, bytes) if matches!(decode(&bytes).unwrap().body, Body::Ping) => {
+                Some(decode(&bytes).unwrap())
+            }
+            _ => None,
+        })
+        .unwrap();
+    let forged = Message {
+        seq: ping.seq,
+        sender_id: Some(9),
+        receiver_id: Some(2),
+        game_name: Some("g".into()),
+        body: Body::Ack,
+    };
+    client.on_datagram(
+        now + Duration::from_millis(150),
+        addr_of(0),
+        false,
+        &encode(&forged).unwrap(),
+    );
+    client.on_tick(now + Duration::from_millis(200));
+    assert!(
+        client.drain_out().iter().any(|out| match out {
+            Out::Unicast(_, bytes) => decode(bytes).unwrap() == ping,
+            _ => false,
+        }),
+        "ACK с неверным ID не должен снимать Ping с повторов"
+    );
+}
+
+#[test]
+fn joining_rejects_conflicting_early_and_acknowledged_ids() {
+    let now = Instant::now();
+    let mut master = Node::new(now, 1, 1);
+    let mut client = Node::new(now, 2, 1);
+    master.command(
+        now,
+        Command::Host {
+            game: "g".into(),
+            player: "host".into(),
+            cfg: Config::default(),
+        },
+    );
+    client.set_server(Some(addr_of(0)));
+    client.command(
+        now,
+        Command::HostOnServer {
+            game: "g".into(),
+            player: "client".into(),
+        },
+    );
+    let join = client
+        .drain_out()
+        .into_iter()
+        .find_map(|out| match out {
+            Out::Unicast(_, bytes) => Some(bytes),
+            _ => None,
+        })
+        .unwrap();
+    master.on_datagram(now, addr_of(1), false, &join);
+    let packets: Vec<_> = master
+        .drain_out()
+        .into_iter()
+        .filter_map(|out| match out {
+            Out::Unicast(_, bytes) => Some(bytes),
+            _ => None,
+        })
+        .collect();
+    let state = packets
+        .iter()
+        .find(|bytes| matches!(decode(bytes).unwrap().body, Body::State(_)))
+        .unwrap();
+    let mut ack = decode(
+        packets
+            .iter()
+            .find(|bytes| matches!(decode(bytes).unwrap().body, Body::Ack))
+            .unwrap(),
+    )
+    .unwrap();
+    client.on_datagram(now, addr_of(0), false, state);
+    client.drain_out();
+    let wrong_ping = Message {
+        seq: 100,
+        sender_id: Some(1),
+        receiver_id: Some(3),
+        game_name: Some("g".into()),
+        body: Body::Ping,
+    };
+    client.on_datagram(now, addr_of(0), false, &encode(&wrong_ping).unwrap());
+    assert!(client.drain_out().is_empty());
+    ack.receiver_id = Some(3);
+    client.on_datagram(now, addr_of(0), false, &encode(&ack).unwrap());
+    assert_eq!(client.phase(), PhaseKind::Lobby);
+    assert!(
+        client
+            .drain_events()
+            .iter()
+            .any(|e| matches!(e, Event::Failure(reason) if reason.contains("ID")))
+    );
+}
+
+#[test]
 fn joining_sends_ping_after_ack_before_receiving_config() {
     let now = Instant::now();
     let mut client = Node::new(now, 1, 1);
