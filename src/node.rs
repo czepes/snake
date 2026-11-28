@@ -1290,6 +1290,108 @@ impl Game {
     }
 }
 
+impl Phase {
+    fn host(&mut self, cx: &mut Ctx, game: String, player: String, cfg: Config) {
+        if !matches!(self, Phase::Lobby) {
+            return;
+        }
+        match Game::new_master(cx, game, player, cfg) {
+            Ok(game) => {
+                cx.ev.push(Event::Joined);
+                *self = Phase::InGame(Box::new(game));
+            }
+            Err(why) => cx.ev.push(Event::Failure(why)),
+        }
+    }
+
+    fn host_on_server(
+        &mut self,
+        cx: &mut Ctx,
+        server: Option<SocketAddrV4>,
+        game: String,
+        player: String,
+    ) {
+        if !matches!(self, Phase::Lobby) {
+            return;
+        }
+        match server {
+            Some(addr) if valid_game_name(&game) && valid_player_name(&player) => {
+                let key = GameKey { name: game, addr };
+                if let Some(joining) = Joining::start(cx, key, player, PlayerStatus::Playing, None)
+                {
+                    *self = Phase::Joining(Box::new(joining));
+                }
+            }
+            Some(_) => cx
+                .ev
+                .push(Event::Failure("Недопустимое имя игры или игрока".into())),
+            None => cx
+                .ev
+                .push(Event::Failure("Адрес сервера курса неизвестен".into())),
+        }
+    }
+
+    fn join(
+        &mut self,
+        cx: &mut Ctx,
+        catalog: &Catalog,
+        key: GameKey,
+        player: String,
+        status: PlayerStatus,
+    ) {
+        if !matches!(self, Phase::Lobby) {
+            return;
+        }
+        if !valid_player_name(&player) {
+            cx.ev.push(Event::Failure("Недопустимое имя игрока".into()));
+            return;
+        }
+        let cfg = catalog.get(&key).map(|entry| entry.config);
+        if let Some(joining) = Joining::start(cx, key, player, status, cfg) {
+            *self = Phase::Joining(Box::new(joining));
+        }
+    }
+
+    fn steer(&mut self, cx: &mut Ctx, dir: Dir) {
+        if let Phase::InGame(game) = self {
+            game.steer(cx, dir);
+        }
+    }
+
+    fn toggle_watch(&mut self, cx: &mut Ctx) -> Flow {
+        match self {
+            Phase::InGame(game) => game.toggle_watch(cx),
+            _ => Flow::Continue,
+        }
+    }
+
+    fn invite_robot(&self, cx: &mut Ctx, server: Option<SocketAddrV4>) {
+        if let (Phase::InGame(game), Some(server)) = (self, server)
+            && game.role == NodeRole::Master
+            && game.leaving.is_none()
+            && let Some(seq) = cx.ob.seq()
+        {
+            let msg = mk(
+                seq,
+                None,
+                None,
+                None,
+                Body::Announcement(vec![game.announcement()]),
+            );
+            cx.ob.unicast(server, &msg);
+            cx.notice("Приглашение отправлено серверу курса");
+        }
+    }
+
+    fn begin_leave(&mut self, cx: &mut Ctx, closing: &mut Vec<Closing>) -> Flow {
+        match self {
+            Phase::InGame(game) if game.leaving.is_none() => game.begin_leave(cx, closing),
+            Phase::Joining(_) => Flow::Left,
+            _ => Flow::Continue,
+        }
+    }
+}
+
 // ───────────────────────────────── Узел ──────────────────────────────────────
 
 /// Автомат одного локального узла: каталог, подключение и активная сессия.
@@ -1441,10 +1543,7 @@ impl Node {
         self.my_port != 0 && from.port() == self.my_port && self.local_ips.contains(from.ip())
     }
 
-    /// Обрабатывает пользовательское действие без ожидания сетевого ответа.
-    /// Результат отражается в событиях и последующих представлениях состояния.
-    pub fn command(&mut self, now: Instant, cmd: Command) {
-        self.now = now;
+    fn reject_exhausted_start(&mut self, cmd: &Command) -> bool {
         if self.ob.exhausted()
             && matches!(
                 cmd,
@@ -1454,6 +1553,17 @@ impl Node {
             self.events.push(Event::Failure(
                 "Исчерпан msg_seq: для новой сессии нужен новый UDP endpoint".into(),
             ));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Обрабатывает пользовательское действие без ожидания сетевого ответа.
+    /// Результат отражается в событиях и последующих представлениях состояния.
+    pub fn command(&mut self, now: Instant, cmd: Command) {
+        self.now = now;
+        if self.reject_exhausted_start(&cmd) {
             return;
         }
         let Node {
@@ -1473,98 +1583,38 @@ impl Node {
             ev: events,
             rng,
         };
-        let mut flow = Flow::Continue;
-
-        match cmd {
+        let flow = match cmd {
             Command::Host { game, player, cfg } => {
-                if matches!(phase, Phase::Lobby) {
-                    match Game::new_master(&mut cx, game, player, cfg) {
-                        Ok(g) => {
-                            cx.ev.push(Event::Joined);
-                            *phase = Phase::InGame(Box::new(g));
-                        }
-                        Err(why) => cx.ev.push(Event::Failure(why)),
-                    }
-                }
+                phase.host(&mut cx, game, player, cfg);
+                Flow::Continue
             }
             Command::HostOnServer { game, player } => {
-                if matches!(phase, Phase::Lobby) {
-                    match *server {
-                        Some(addr) if valid_game_name(&game) && valid_player_name(&player) => {
-                            let key = GameKey { name: game, addr };
-                            if let Some(joining) =
-                                Joining::start(&mut cx, key, player, PlayerStatus::Playing, None)
-                            {
-                                *phase = Phase::Joining(Box::new(joining));
-                            }
-                        }
-                        Some(_) => cx
-                            .ev
-                            .push(Event::Failure("Недопустимое имя игры или игрока".into())),
-                        None => cx
-                            .ev
-                            .push(Event::Failure("Адрес сервера курса неизвестен".into())),
-                    }
-                }
+                phase.host_on_server(&mut cx, *server, game, player);
+                Flow::Continue
             }
             Command::Join {
                 key,
                 player,
                 status,
             } => {
-                if matches!(phase, Phase::Lobby) {
-                    if !valid_player_name(&player) {
-                        cx.ev.push(Event::Failure("Недопустимое имя игрока".into()));
-                    } else {
-                        // Конфигурация известна из анонса выбранной игры.
-                        let cfg = catalog.get(&key).map(|e| e.config);
-                        if let Some(joining) = Joining::start(&mut cx, key, player, status, cfg) {
-                            *phase = Phase::Joining(Box::new(joining));
-                        }
-                    }
-                }
+                phase.join(&mut cx, catalog, key, player, status);
+                Flow::Continue
             }
-            Command::Steer(d) => {
-                if let Phase::InGame(g) = phase {
-                    g.steer(&mut cx, d);
-                }
+            Command::Steer(dir) => {
+                phase.steer(&mut cx, dir);
+                Flow::Continue
             }
-            Command::ToggleWatch => {
-                if let Phase::InGame(g) = phase {
-                    flow = g.toggle_watch(&mut cx);
-                }
+            Command::ToggleWatch => phase.toggle_watch(&mut cx),
+            Command::InviteRobot => {
+                phase.invite_robot(&mut cx, *server);
+                Flow::Continue
             }
-            Command::InviteRobot
-                if let (Phase::InGame(g), Some(srv)) = (&*phase, *server)
-                    && g.role == NodeRole::Master
-                    && g.leaving.is_none() =>
-            {
-                if let Some(seq) = cx.ob.seq() {
-                    let m = mk(
-                        seq,
-                        None,
-                        None,
-                        None,
-                        Body::Announcement(vec![g.announcement()]),
-                    );
-                    cx.ob.unicast(srv, &m);
-                    cx.notice("Приглашение отправлено серверу курса");
-                }
+            Command::Leave => phase.begin_leave(&mut cx, closing),
+            Command::Quit => {
+                *quitting = true;
+                phase.begin_leave(&mut cx, closing)
             }
-            Command::InviteRobot => {}
-            Command::Leave | Command::Quit => {
-                if matches!(cmd, Command::Quit) {
-                    *quitting = true;
-                }
-                match phase {
-                    Phase::InGame(g) if g.leaving.is_none() => {
-                        flow = g.begin_leave(&mut cx, closing)
-                    }
-                    Phase::Joining(_) => flow = Flow::Left,
-                    _ => {}
-                }
-            }
-        }
+        };
         self.finish_flow(flow);
         self.after_call();
     }
@@ -1848,6 +1898,107 @@ mod tests {
         node.on_datagram(now, addr, false, &encode(&join).unwrap());
         node.drain_out();
         node.drain_events();
+    }
+
+    #[test]
+    fn invalid_lobby_commands_report_failures_without_starting_a_session() {
+        let now = Instant::now();
+        let mut node = Node::new(now, 1, 1);
+        node.command(
+            now,
+            Command::Host {
+                game: "".into(),
+                player: "host".into(),
+                cfg: Config::default(),
+            },
+        );
+        node.command(
+            now,
+            Command::HostOnServer {
+                game: "g".into(),
+                player: "host".into(),
+            },
+        );
+        node.set_server(Some(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 9193)));
+        node.command(
+            now,
+            Command::HostOnServer {
+                game: "".into(),
+                player: "host".into(),
+            },
+        );
+        node.command(
+            now,
+            Command::Join {
+                key: GameKey {
+                    name: "g".into(),
+                    addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 4000),
+                },
+                player: "".into(),
+                status: PlayerStatus::Viewing,
+            },
+        );
+        assert_eq!(node.phase(), PhaseKind::Lobby);
+        assert!(node.drain_out().is_empty());
+        let failures = node
+            .drain_events()
+            .into_iter()
+            .filter(|e| matches!(e, Event::Failure(_)))
+            .count();
+        assert_eq!(failures, 4);
+    }
+
+    #[test]
+    fn inviting_the_server_is_allowed_only_for_an_active_master() {
+        let now = Instant::now();
+        let server = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 9193);
+        let mut node = Node::new(now, 1, 1);
+        node.set_server(Some(server));
+        node.command(now, Command::InviteRobot);
+        assert!(node.drain_out().is_empty());
+        node.command(
+            now,
+            Command::Host {
+                game: "g".into(),
+                player: "host".into(),
+                cfg: Config::default(),
+            },
+        );
+        node.command(now, Command::InviteRobot);
+        let packets = node.drain_out();
+        assert!(packets.iter().any(|out| match out {
+            Out::Unicast(to, bytes) if *to == server => matches!(decode(bytes).unwrap().body, Body::Announcement(games) if games.len() == 1 && games[0].game_name == "g"),
+            _ => false,
+        }));
+        assert!(
+            node.drain_events()
+                .iter()
+                .any(|e| matches!(e, Event::Notice(reason) if reason.contains("Приглашение")))
+        );
+        node.command(now, Command::Leave);
+        node.command(now, Command::InviteRobot);
+        assert!(node.drain_out().is_empty());
+    }
+
+    #[test]
+    fn quitting_while_joining_returns_to_lobby_and_emits_exit() {
+        let now = Instant::now();
+        let mut node = Node::new(now, 1, 1);
+        node.command(
+            now,
+            Command::Join {
+                key: GameKey {
+                    name: "g".into(),
+                    addr: SocketAddrV4::new(Ipv4Addr::LOCALHOST, 4000),
+                },
+                player: "player".into(),
+                status: PlayerStatus::Viewing,
+            },
+        );
+        assert_eq!(node.phase(), PhaseKind::Joining);
+        node.command(now, Command::Quit);
+        assert_eq!(node.phase(), PhaseKind::Lobby);
+        assert!(node.drain_events().contains(&Event::Exited));
     }
 
     #[test]
