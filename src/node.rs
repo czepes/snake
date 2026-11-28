@@ -671,9 +671,88 @@ impl Game {
         self.after_change(cx)
     }
 
+    /// Повтор Leave подтверждается и после удаления участника.
+    fn m_sender(&mut self, cx: &mut Ctx, from: SocketAddrV4, msg: &Message) -> Option<PlayerInfo> {
+        match self.rel.classify(from, msg.seq) {
+            Seen::TooOld => return None,
+            Seen::Duplicate(reply) => {
+                if let Some(r) = reply {
+                    self.rel.resend_reply(cx.ob, cx.now, from, &r);
+                }
+                return None;
+            }
+            Seen::New => {}
+        }
+        let player = self
+            .players
+            .iter()
+            .find(|p| p.addr == Some(from))
+            .cloned()?;
+        if msg.sender_id.is_some_and(|id| id != player.id)
+            || msg.receiver_id.is_some_and(|id| id != self.my_id)
+            || !self.rel.can_admit(from)
+        {
+            return None;
+        }
+        self.rel.touch(from, cx.now);
+        Some(player)
+    }
+
+    fn m_ack(&mut self, cx: &mut Ctx, to: SocketAddrV4, id: i32, seq: i64) {
+        let ack = self.rel.send_ack(
+            cx.ob,
+            cx.now,
+            to,
+            seq,
+            (Some(self.my_id), Some(id)),
+            &self.name,
+        );
+        self.rel.record(to, seq, Some(ack));
+    }
+
+    fn m_steer(&mut self, player: &PlayerInfo, seq: i64, dir: Dir) {
+        let last = self.m.steer_seq.get(&player.id).copied().unwrap_or(-1);
+        if seq > last {
+            self.m.steer_seq.insert(player.id, seq);
+            // Неверный разворот учитывается в порядке сообщений, но не
+            // стирает последнюю допустимую команду на этот ход.
+            if player.status == PlayerStatus::Playing && self.world.is_steer_valid(player.id, dir) {
+                self.m.steers.insert(player.id, (seq, dir));
+            }
+        }
+    }
+
+    fn m_status(
+        &mut self,
+        cx: &mut Ctx,
+        from: SocketAddrV4,
+        id: i32,
+        seq: i64,
+        target: PlayerStatus,
+    ) -> Flow {
+        let last = self.m.status_seq.get(&id).copied().unwrap_or(-1);
+        if seq <= last {
+            self.m_ack(cx, from, id, seq);
+            return Flow::Continue;
+        }
+        self.m.status_seq.insert(id, seq);
+        match self.set_status(cx, id, target) {
+            Ok(changed) => {
+                self.m_ack(cx, from, id, seq);
+                if changed {
+                    return self.after_change(cx);
+                }
+                let state = self.msg(Some(id), Body::State(self.build_state()));
+                self.rel
+                    .send_request(cx.ob, cx.now, from, Kind::State, state);
+            }
+            Err(why) => self.m_error(cx, from, Some(id), seq, why),
+        }
+        Flow::Continue
+    }
+
     /// Входящие на MASTER: ACK отдельно, затем Join или запрос участника.
-    /// Окно повторов защищает от повторного исполнения, а `steer_seq`/`status_seq`
-    /// дополнительно не дают запоздалой новой команде отменить более свежую.
+    /// Порядок команд курса и статуса проверяется независимо.
     fn m_message(&mut self, cx: &mut Ctx, from: SocketAddrV4, msg: Message) -> Flow {
         match &msg.body {
             Body::Ack => {
@@ -685,112 +764,22 @@ impl Game {
             Body::Join { .. } => return self.m_join(cx, from, msg),
             _ => {}
         }
-
-        // Запрос зарегистрированного участника. Повтор подтверждаем до проверки
-        // участия: так повтор Leave подтверждается и после удаления участника.
-        match self.rel.classify(from, msg.seq) {
-            Seen::TooOld => return Flow::Continue,
-            Seen::Duplicate(reply) => {
-                if let Some(r) = reply {
-                    self.rel.resend_reply(cx.ob, cx.now, from, &r);
-                }
-                return Flow::Continue;
-            }
-            Seen::New => {}
-        }
-        let Some(pl) = self.players.iter().find(|p| p.addr == Some(from)).cloned() else {
+        let Some(player) = self.m_sender(cx, from, &msg) else {
             return Flow::Continue;
         };
-        if msg.sender_id.is_some_and(|s| s != pl.id)
-            || msg.receiver_id.is_some_and(|r| r != self.my_id)
-        {
-            return Flow::Continue;
-        }
-        if !self.rel.can_admit(from) {
-            return Flow::Continue;
-        }
-        self.rel.touch(from, cx.now);
-
         match msg.body {
-            Body::Ping => {
-                let ack = self.rel.send_ack(
-                    cx.ob,
-                    cx.now,
-                    from,
-                    msg.seq,
-                    (Some(self.my_id), Some(pl.id)),
-                    &self.name,
-                );
-                self.rel.record(from, msg.seq, Some(ack));
-            }
+            Body::Ping => self.m_ack(cx, from, player.id, msg.seq),
             Body::Steer(dir) => {
-                let last = self.m.steer_seq.get(&pl.id).copied().unwrap_or(-1);
-                if msg.seq > last {
-                    self.m.steer_seq.insert(pl.id, msg.seq);
-                    // Неверный разворот учитывается в порядке сообщений, но не
-                    // стирает последнюю допустимую команду на этот ход.
-                    if pl.status == PlayerStatus::Playing && self.world.is_steer_valid(pl.id, dir) {
-                        self.m.steers.insert(pl.id, (msg.seq, dir));
-                    }
-                }
-                let ack = self.rel.send_ack(
-                    cx.ob,
-                    cx.now,
-                    from,
-                    msg.seq,
-                    (Some(self.my_id), Some(pl.id)),
-                    &self.name,
-                );
-                self.rel.record(from, msg.seq, Some(ack));
+                self.m_steer(&player, msg.seq, dir);
+                self.m_ack(cx, from, player.id, msg.seq);
             }
             Body::StatusChange(target) => {
-                let last = self.m.status_seq.get(&pl.id).copied().unwrap_or(-1);
-                if msg.seq <= last {
-                    let ack = self.rel.send_ack(
-                        cx.ob,
-                        cx.now,
-                        from,
-                        msg.seq,
-                        (Some(self.my_id), Some(pl.id)),
-                        &self.name,
-                    );
-                    self.rel.record(from, msg.seq, Some(ack));
-                    return Flow::Continue;
-                }
-                self.m.status_seq.insert(pl.id, msg.seq);
-                match self.set_status(cx, pl.id, target) {
-                    Ok(changed) => {
-                        let ack = self.rel.send_ack(
-                            cx.ob,
-                            cx.now,
-                            from,
-                            msg.seq,
-                            (Some(self.my_id), Some(pl.id)),
-                            &self.name,
-                        );
-                        self.rel.record(from, msg.seq, Some(ack));
-                        if changed {
-                            return self.after_change(cx);
-                        }
-                        let state = self.msg(Some(pl.id), Body::State(self.build_state()));
-                        self.rel
-                            .send_request(cx.ob, cx.now, from, Kind::State, state);
-                    }
-                    Err(why) => self.m_error(cx, from, Some(pl.id), msg.seq, why),
-                }
+                return self.m_status(cx, from, player.id, msg.seq, target);
             }
             Body::Leave => {
-                let ack = self.rel.send_ack(
-                    cx.ob,
-                    cx.now,
-                    from,
-                    msg.seq,
-                    (Some(self.my_id), Some(pl.id)),
-                    &self.name,
-                );
-                self.rel.record(from, msg.seq, Some(ack));
-                cx.notice(format!("«{}» вышел из игры", pl.name));
-                self.remove_player(pl.id);
+                self.m_ack(cx, from, player.id, msg.seq);
+                cx.notice(format!("«{}» вышел из игры", player.name));
+                self.remove_player(player.id);
                 return self.after_change(cx);
             }
             _ => {}
@@ -1859,6 +1848,84 @@ mod tests {
         node.on_datagram(now, addr, false, &encode(&join).unwrap());
         node.drain_out();
         node.drain_events();
+    }
+
+    #[test]
+    fn master_keeps_separate_ordering_for_status_and_steering() {
+        let now = Instant::now();
+        let mut node = host_at_order(now, 0);
+        let peer = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 4000);
+        join_viewer(&mut node, now, peer);
+        let send = |node: &mut Node, when, seq, body| {
+            let message = mk(seq, Some(2), Some(1), Some("g"), body);
+            node.on_datagram(when, peer, false, &encode(&message).unwrap());
+        };
+        send(
+            &mut node,
+            now,
+            20,
+            Body::StatusChange(PlayerStatus::Playing),
+        );
+        send(
+            &mut node,
+            now,
+            19,
+            Body::StatusChange(PlayerStatus::Viewing),
+        );
+        assert_eq!(
+            node.game_view()
+                .unwrap()
+                .players
+                .iter()
+                .find(|p| p.id == 2)
+                .unwrap()
+                .status,
+            PlayerStatus::Playing
+        );
+        let world = node.debug_world_mut().unwrap();
+        for snake in &mut world.snakes {
+            let head = if snake.owner == 2 { (10, 7) } else { (1, 1) };
+            snake.cells = [head, (head.0 - 1, head.1)].into_iter().collect();
+            snake.dir = Dir::Right;
+        }
+        world.foods.clear();
+        send(&mut node, now, 30, Body::Steer(Dir::Up));
+        send(&mut node, now, 29, Body::Steer(Dir::Down));
+        let replies = node.drain_out();
+        for seq in [20, 19, 30, 29] {
+            assert!(
+                replies.iter().any(|out| match out {
+                    Out::Unicast(to, bytes) if *to == peer => {
+                        let message = decode(bytes).unwrap();
+                        message.seq == seq && matches!(message.body, Body::Ack)
+                    }
+                    _ => false,
+                }),
+                "нет ACK для {seq}"
+            );
+        }
+        let next = now + Duration::from_secs(1);
+        node.on_tick(next);
+        assert_eq!(
+            node.game_view().unwrap().world.snake(2).unwrap().dir,
+            Dir::Up
+        );
+        send(
+            &mut node,
+            next,
+            21,
+            Body::StatusChange(PlayerStatus::Viewing),
+        );
+        assert_eq!(
+            node.game_view()
+                .unwrap()
+                .players
+                .iter()
+                .find(|p| p.id == 2)
+                .unwrap()
+                .status,
+            PlayerStatus::Viewing
+        );
     }
 
     #[test]
