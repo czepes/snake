@@ -4,8 +4,9 @@
 //! здесь нет. Любая причина отказа показывается на экране.
 //!
 //! Фаза [`Node`] выбирает основной экран (лобби, подключение, игра); локальный
-//! `Screen` нужен только для форм внутри лобби. Ввод проходит через [`Ui::on_key`],
-//! уведомления ядра — через [`Ui::on_event`], кадр собирает [`Ui::draw`].
+//! `Screen` нужен только для форм внутри лобби. [`Ui::handle_key`] возвращает
+//! команды для главного цикла, [`Ui::on_event`] принимает уведомления ядра,
+//! кадр собирает [`Ui::draw`].
 //! Отрисовка читает [`GameView`], а не изменяет мир; анимации накладываются
 //! на готовый буфер и не влияют на сетевые таймеры или правила.
 
@@ -76,6 +77,50 @@ impl CreateForm {
             delay: "300".into(),
             on_server: false,
             error: None,
+        }
+    }
+
+    fn edit(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Backspace => {
+                if let Some(value) = self.current_text() {
+                    value.pop();
+                }
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Char('h' | 'H' | 'l' | 'L' | ' ')
+                if self.field == 5 =>
+            {
+                self.on_server = !self.on_server;
+            }
+            KeyCode::Char(c) => self.insert(c),
+            _ => {}
+        }
+    }
+
+    fn current_text(&mut self) -> Option<&mut String> {
+        match self.field {
+            0 => Some(&mut self.game),
+            1 => Some(&mut self.width),
+            2 => Some(&mut self.height),
+            3 => Some(&mut self.food),
+            4 => Some(&mut self.delay),
+            _ => None,
+        }
+    }
+
+    fn insert(&mut self, c: char) {
+        let (limit, allowed) = match self.field {
+            0 => (32, !c.is_control()),
+            1 | 2 => (4, c.is_ascii_digit()),
+            3 => (3, c.is_ascii_digit()),
+            4 => (5, c.is_ascii_digit()),
+            _ => return,
+        };
+        if let Some(value) = self.current_text()
+            && allowed
+            && value.len() + c.len_utf8() <= limit
+        {
+            value.push(c);
         }
     }
 }
@@ -321,34 +366,7 @@ impl Ui {
                 f.field = (f.field + FIELDS - 1) % FIELDS
             }
             KeyCode::Enter => return self.submit_form(),
-            KeyCode::Backspace => {
-                match f.field {
-                    0 => f.game.pop(),
-                    1 => f.width.pop(),
-                    2 => f.height.pop(),
-                    3 => f.food.pop(),
-                    4 => f.delay.pop(),
-                    _ => None,
-                };
-            }
-            KeyCode::Left
-            | KeyCode::Char('h' | 'H')
-            | KeyCode::Right
-            | KeyCode::Char('l' | 'L')
-                if f.field == 5 =>
-            {
-                f.on_server = !f.on_server
-            }
-            KeyCode::Char(' ') if f.field == 5 => f.on_server = !f.on_server,
-            KeyCode::Char(c) => match f.field {
-                0 if !c.is_control() && f.game.len() + c.len_utf8() <= 32 => f.game.push(c),
-                1 if c.is_ascii_digit() && f.width.len() < 4 => f.width.push(c),
-                2 if c.is_ascii_digit() && f.height.len() < 4 => f.height.push(c),
-                3 if c.is_ascii_digit() && f.food.len() < 3 => f.food.push(c),
-                4 if c.is_ascii_digit() && f.delay.len() < 5 => f.delay.push(c),
-                _ => {}
-            },
-            _ => {}
+            code => f.edit(code),
         }
         None
     }

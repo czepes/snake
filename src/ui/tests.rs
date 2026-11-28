@@ -163,6 +163,59 @@ fn create_on_server_uses_server_command_and_keeps_parameters_independent() {
 }
 
 #[test]
+fn create_form_edits_parameters_and_limits_game_name_in_utf8_bytes() {
+    let now = Instant::now();
+    let node = Node::new(now, 42, 1);
+    let mut ui = Ui::new("Игрок".into());
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    ui.handle_key(key(KeyCode::Char('c')), &node, now);
+    for _ in 0..4 {
+        ui.handle_key(key(KeyCode::Backspace), &node, now);
+    }
+    for _ in 0..17 {
+        ui.handle_key(key(KeyCode::Char('Я')), &node, now);
+    }
+    for (backspaces, value) in [(2, "10"), (2, "100"), (1, "0"), (3, "3000")] {
+        ui.handle_key(key(KeyCode::Tab), &node, now);
+        for _ in 0..backspaces {
+            ui.handle_key(key(KeyCode::Backspace), &node, now);
+        }
+        for c in value.chars() {
+            ui.handle_key(key(KeyCode::Char(c)), &node, now);
+        }
+    }
+    let command = ui.handle_key(key(KeyCode::Enter), &node, now).unwrap();
+    assert!(matches!(command, Command::Host { game, cfg, .. }
+        if game == "Я".repeat(16)
+            && cfg == (Config { width: 10, height: 100, food_static: 0, state_delay_ms: 3000 })));
+}
+
+#[test]
+fn create_form_rejects_invalid_configuration_without_a_command() {
+    let now = Instant::now();
+    let node = Node::new(now, 42, 1);
+    let mut ui = Ui::new("Игрок".into());
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    ui.handle_key(key(KeyCode::Char('c')), &node, now);
+    ui.handle_key(key(KeyCode::Tab), &node, now);
+    ui.handle_key(key(KeyCode::Backspace), &node, now);
+    ui.handle_key(key(KeyCode::Backspace), &node, now);
+    ui.handle_key(key(KeyCode::Char('9')), &node, now);
+    assert!(ui.handle_key(key(KeyCode::Enter), &node, now).is_none());
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal.draw(|f| ui.draw(f, &node, now, true)).unwrap();
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(text.contains("Ширина и высота: 10–100"));
+    assert_eq!(node.phase(), PhaseKind::Lobby);
+}
+
+#[test]
 fn game_controls_follow_player_status_and_role() {
     let now = Instant::now();
     let mut node = Node::new(now, 42, 1);
