@@ -176,9 +176,7 @@ impl Joining {
             self.master_id,
             &self.key.name,
         ) {
-            if !self.acked {
-                self.early_id = self.early_id.or(msg.receiver_id);
-            }
+            self.early_id = self.early_id.or(msg.receiver_id);
             let newer = self
                 .buffered
                 .as_ref()

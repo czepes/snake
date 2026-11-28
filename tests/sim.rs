@@ -1133,10 +1133,19 @@ fn joining_accepts_ack_state_and_config_in_any_order() {
             unreachable!();
         };
         state.players[0].score = 123;
+        let mut after_ack = newer.clone();
+        after_ack.seq += 2;
+        let Body::State(ref mut state) = after_ack.body else {
+            unreachable!();
+        };
+        state.order += 1;
         for (i, index) in order.into_iter().enumerate() {
             if index == 1 {
                 client.on_datagram(now, addr_of(0), false, &encode(&newer).unwrap());
                 client.on_datagram(now, addr_of(0), false, &encode(&same_order).unwrap());
+                if order[0] == 0 {
+                    client.on_datagram(now, addr_of(0), false, &encode(&after_ack).unwrap());
+                }
             }
             client.on_datagram(
                 now,
@@ -1165,7 +1174,7 @@ fn joining_accepts_ack_state_and_config_in_any_order() {
         assert_eq!(view.my_id, 2);
         assert_eq!(view.players.len(), 2);
         assert_eq!(view.status, PlayerStatus::Playing);
-        assert_eq!(view.order, expected_order);
+        assert_eq!(view.order, expected_order + i32::from(order[0] == 0));
         assert_ne!(view.players[0].score, 123);
         client.drain_out();
         client.on_tick(now + Duration::from_millis(100));
