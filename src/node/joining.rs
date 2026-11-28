@@ -204,17 +204,9 @@ impl Joining {
         if let Some(step) = self.expire(cx) {
             return step;
         }
-        if !matches!(self.stage, Stage::Attempt) || !self.matches_message(from, &msg) {
-            return JoinStep::Wait;
-        }
-        let name = self.key.name.clone();
-        let my_id = self.my_id.or(self.early_id);
-        if (self.acked || !matches!(msg.body, Body::Ack))
-            && (self
-                .master_id
-                .zip(msg.sender_id)
-                .is_some_and(|(a, b)| a != b)
-                || my_id.zip(msg.receiver_id).is_some_and(|(a, b)| a != b))
+        if !matches!(self.stage, Stage::Attempt)
+            || !self.matches_message(from, &msg)
+            || !self.matches_ids(&msg)
         {
             return JoinStep::Wait;
         }
@@ -224,6 +216,26 @@ impl Joining {
         ) {
             self.rel.touch(from, cx.now);
         }
+        self.handle_message(cx, from, msg)
+    }
+
+    fn matches_ids(&self, msg: &Message) -> bool {
+        if !self.acked && matches!(msg.body, Body::Ack) {
+            return true;
+        }
+        self.master_id
+            .zip(msg.sender_id)
+            .is_none_or(|(expected, actual)| expected == actual)
+            && self
+                .my_id
+                .or(self.early_id)
+                .zip(msg.receiver_id)
+                .is_none_or(|(expected, actual)| expected == actual)
+    }
+
+    fn handle_message(&mut self, cx: &mut Ctx, from: SocketAddrV4, msg: Message) -> JoinStep {
+        let name = self.key.name.clone();
+        let my_id = self.my_id.or(self.early_id);
         match msg.body {
             Body::Ack => {
                 if let Some(why) = self.on_ack(cx, from, &msg) {
