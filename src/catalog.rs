@@ -55,13 +55,11 @@ impl Entry {
     }
 
     pub fn from_lan(&self, now: Instant) -> bool {
-        self.lan_seen
-            .is_some_and(|t| now.duration_since(t) <= ENTRY_TTL)
+        seen_recently(self.lan_seen, now)
     }
 
     pub fn from_server(&self, now: Instant) -> bool {
-        self.server_seen
-            .is_some_and(|t| now.duration_since(t) <= ENTRY_TTL)
+        seen_recently(self.server_seen, now)
     }
 
     /// Можно ли присоединиться наблюдателем.
@@ -73,6 +71,10 @@ impl Entry {
     pub fn can_play(&self) -> bool {
         self.can_join && self.can_watch() && self.snakes() < MAX_SNAKES
     }
+}
+
+fn seen_recently(seen: Option<Instant>, now: Instant) -> bool {
+    seen.is_some_and(|t| now.duration_since(t) <= ENTRY_TTL)
 }
 
 #[derive(Default)]
@@ -189,6 +191,25 @@ mod tests {
         let list = c.list();
         assert_eq!(list.len(), 1);
         assert!(list[0].from_lan(t) && list[0].from_server(t));
+    }
+
+    #[test]
+    fn sources_expire_independently_at_the_ttl_boundary() {
+        let mut c = Catalog::new();
+        let t = Instant::now();
+        c.ingest(t, a(1), &[ann("g", 1)], Source::Lan);
+        c.ingest(
+            t + Duration::from_secs(1),
+            a(1),
+            &[ann("g", 1)],
+            Source::Server,
+        );
+        let entry = c.list()[0];
+        assert!(entry.from_lan(t + ENTRY_TTL));
+        assert!(entry.from_server(t + ENTRY_TTL));
+        assert!(!entry.from_lan(t + ENTRY_TTL + Duration::from_millis(1)));
+        assert!(entry.from_server(t + ENTRY_TTL + Duration::from_secs(1)));
+        assert!(!entry.from_server(t + ENTRY_TTL + Duration::from_millis(1001)));
     }
 
     #[test]
