@@ -24,7 +24,7 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 use std::time::{Duration, Instant};
 
 use crate::catalog::{Catalog, Entry, GameKey, Source};
-use crate::reliable::{Kind, Out, Outbox, Reliable, Seen, describe};
+use crate::reliable::{Fault, Kind, Out, Outbox, Reliable, Seen, describe};
 use crate::rules::{Rng, Snake, World};
 use crate::wire::*;
 
@@ -554,8 +554,9 @@ impl Game {
                 request_seq: req_seq,
             },
         );
-        let sent = self.rel.send_request(cx.ob, cx.now, to, Kind::Control, m);
-        self.rel.record(to, req_seq, Some(sent));
+        if let Some(sent) = self.rel.send_request(cx.ob, cx.now, to, Kind::Control, m) {
+            self.rel.record(to, req_seq, Some(sent));
+        }
     }
 
     /// Допуск endpoint: повтор в пределах окна возвращает прежний ответ,
@@ -804,8 +805,9 @@ impl Game {
                         order,
                     },
                 );
-                let sent = self.rel.send_request(cx.ob, cx.now, from, Kind::Control, m);
-                if let Some(l) = &mut self.leaving {
+                if let Some(sent) = self.rel.send_request(cx.ob, cx.now, from, Kind::Control, m)
+                    && let Some(l) = &mut self.leaving
+                {
                     l.stage = HandoverStage::RoleChange(sent.seq);
                 }
             }
@@ -869,9 +871,11 @@ impl Game {
             }
         }
 
-        if cx.now >= self.m.next_announce {
+        if cx.now >= self.m.next_announce
+            && let Some(seq) = cx.ob.seq()
+        {
             let m = mk(
-                cx.ob.seq(),
+                seq,
                 None,
                 None,
                 None,
@@ -1152,12 +1156,11 @@ impl Game {
     /// MASTER остаётся в сессии до двух ACK передачи управления или дедлайна.
     fn begin_leave(&mut self, cx: &mut Ctx, closing: &mut Vec<Closing>) -> Flow {
         if self.role != NodeRole::Master {
-            if let Some(to) = self.master_addr {
+            if let Some(to) = self.master_addr
+                && let Some(seq) = cx.ob.seq()
+            {
                 let msg = self.msg(self.master_id(), Body::Leave);
-                let msg = Message {
-                    seq: cx.ob.seq(),
-                    ..msg
-                };
+                let msg = Message { seq, ..msg };
                 cx.ob.unicast(to, &msg);
                 closing.push(Closing {
                     to,
@@ -1185,12 +1188,13 @@ impl Game {
         // ведь именно ACK на этот seq разрешает перейти к RoleChange.
         let state = self.build_state();
         let m = self.msg(Some(id), Body::State(state));
-        let sent = self.rel.send_request(cx.ob, cx.now, addr, Kind::Control, m);
-        self.leaving = Some(Leaving {
-            stage: HandoverStage::State(sent.seq),
-            deadline: cx.now + LEAVE_DEADLINE,
-            to: addr,
-        });
+        if let Some(sent) = self.rel.send_request(cx.ob, cx.now, addr, Kind::Control, m) {
+            self.leaving = Some(Leaving {
+                stage: HandoverStage::State(sent.seq),
+                deadline: cx.now + LEAVE_DEADLINE,
+                to: addr,
+            });
+        }
         Flow::Continue
     }
 
@@ -1425,6 +1429,17 @@ impl Node {
     /// Результат отражается в событиях и последующих представлениях состояния.
     pub fn command(&mut self, now: Instant, cmd: Command) {
         self.now = now;
+        if self.ob.exhausted()
+            && matches!(
+                cmd,
+                Command::Host { .. } | Command::HostOnServer { .. } | Command::Join { .. }
+            )
+        {
+            self.events.push(Event::Failure(
+                "Исчерпан msg_seq: для новой сессии нужен новый UDP endpoint".into(),
+            ));
+            return;
+        }
         let Node {
             phase,
             ob,
@@ -1461,13 +1476,11 @@ impl Node {
                     match *server {
                         Some(addr) if valid_game_name(&game) && valid_player_name(&player) => {
                             let key = GameKey { name: game, addr };
-                            *phase = Phase::Joining(Box::new(Joining::start(
-                                &mut cx,
-                                key,
-                                player,
-                                PlayerStatus::Playing,
-                                None,
-                            )));
+                            if let Some(joining) =
+                                Joining::start(&mut cx, key, player, PlayerStatus::Playing, None)
+                            {
+                                *phase = Phase::Joining(Box::new(joining));
+                            }
                         }
                         Some(_) => cx
                             .ev
@@ -1489,9 +1502,9 @@ impl Node {
                     } else {
                         // Конфигурация известна из анонса выбранной игры.
                         let cfg = catalog.get(&key).map(|e| e.config);
-                        *phase = Phase::Joining(Box::new(Joining::start(
-                            &mut cx, key, player, status, cfg,
-                        )));
+                        if let Some(joining) = Joining::start(&mut cx, key, player, status, cfg) {
+                            *phase = Phase::Joining(Box::new(joining));
+                        }
                     }
                 }
             }
@@ -1510,15 +1523,17 @@ impl Node {
                     && g.role == NodeRole::Master
                     && g.leaving.is_none() =>
             {
-                let m = mk(
-                    cx.ob.seq(),
-                    None,
-                    None,
-                    None,
-                    Body::Announcement(vec![g.announcement()]),
-                );
-                cx.ob.unicast(srv, &m);
-                cx.notice("Приглашение отправлено серверу курса");
+                if let Some(seq) = cx.ob.seq() {
+                    let m = mk(
+                        seq,
+                        None,
+                        None,
+                        None,
+                        Body::Announcement(vec![g.announcement()]),
+                    );
+                    cx.ob.unicast(srv, &m);
+                    cx.notice("Приглашение отправлено серверу курса");
+                }
             }
             Command::InviteRobot => {}
             Command::Leave | Command::Quit => {
@@ -1578,15 +1593,17 @@ impl Node {
                 if !self.is_self(from) {
                     self.on_announcement(now, from, via_multicast, games);
                 }
+                self.after_call();
                 return;
             }
             Body::Discover => {
                 if let Phase::InGame(g) = &self.phase
                     && g.role == NodeRole::Master
                     && g.leaving.is_none()
+                    && let Some(seq) = self.ob.seq()
                 {
                     let m = mk(
-                        self.ob.seq(),
+                        seq,
                         None,
                         None,
                         None,
@@ -1594,6 +1611,7 @@ impl Node {
                     );
                     self.ob.unicast(from, &m);
                 }
+                self.after_call();
                 return;
             }
             _ => {}
@@ -1700,9 +1718,11 @@ impl Node {
         match phase {
             Phase::Lobby
                 if let Some(srv) = *server
-                    && last_discover.is_none_or(|t| now.duration_since(t) >= DISCOVER_PERIOD) =>
+                    && last_discover.is_none_or(|t| now.duration_since(t) >= DISCOVER_PERIOD)
+                    && !cx.ob.exhausted()
+                    && let Some(seq) = cx.ob.seq() =>
             {
-                let m = mk(cx.ob.seq(), None, None, None, Body::Discover);
+                let m = mk(seq, None, None, None, Body::Discover);
                 cx.ob.unicast(srv, &m);
                 *last_discover = Some(now);
             }
@@ -1749,14 +1769,86 @@ impl Node {
 
     /// Общие проверки после любого вызова: ошибка реализации, завершение работы.
     fn after_call(&mut self) {
-        if let Some(why) = self.ob.fault.take() {
-            self.phase = Phase::Lobby;
-            self.events
-                .push(Event::Failure(format!("Внутренняя ошибка: {why}")));
+        match self.ob.fault.take() {
+            Some(Fault::SequenceExhausted) => {
+                let in_game = matches!(self.phase, Phase::InGame(_));
+                self.phase = Phase::Lobby;
+                self.closing.clear();
+                let why = "Исчерпан msg_seq: для новой сессии нужен новый UDP endpoint".to_owned();
+                self.events.push(Event::Failure(why.clone()));
+                if in_game {
+                    self.events.push(Event::GameOver(why));
+                }
+            }
+            Some(Fault::Encoding(why)) => {
+                self.phase = Phase::Lobby;
+                self.events
+                    .push(Event::Failure(format!("Внутренняя ошибка: {why}")));
+            }
+            None => {}
         }
         if self.quitting && matches!(self.phase, Phase::Lobby) && self.closing.is_empty() {
             self.quitting = false;
             self.events.push(Event::Exited);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sequence_exhaustion_ends_the_session_without_reusing_a_number() {
+        let now = Instant::now();
+        let mut node = Node::new(now, 1, i64::MAX - 1);
+        node.command(
+            now,
+            Command::Host {
+                game: "g".into(),
+                player: "host".into(),
+                cfg: Config::default(),
+            },
+        );
+        node.on_tick(now);
+        let Out::Multicast(bytes) = node.drain_out().pop().unwrap() else {
+            panic!("ожидался анонс");
+        };
+        assert_eq!(decode(&bytes).unwrap().seq, i64::MAX - 1);
+
+        let from = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 4000);
+        let discover = encode(&mk(1, None, None, None, Body::Discover)).unwrap();
+        node.on_datagram(now, from, false, &discover);
+        let Out::Unicast(_, bytes) = node.drain_out().pop().unwrap() else {
+            panic!("ожидался ответ на Discover");
+        };
+        assert_eq!(decode(&bytes).unwrap().seq, i64::MAX);
+        assert_eq!(node.phase(), PhaseKind::Lobby);
+        assert!(
+            node.drain_events()
+                .iter()
+                .any(|event| matches!(event, Event::Failure(reason) if reason.contains("msg_seq")))
+        );
+
+        node.on_datagram(now, from, false, &discover);
+        node.set_server(Some(from));
+        node.on_tick(now + Duration::from_secs(1));
+        assert!(node.drain_out().is_empty());
+        assert!(node.drain_events().is_empty());
+
+        node.command(
+            now + Duration::from_secs(1),
+            Command::Host {
+                game: "new".into(),
+                player: "host".into(),
+                cfg: Config::default(),
+            },
+        );
+        assert_eq!(node.phase(), PhaseKind::Lobby);
+        assert!(
+            node.drain_events().iter().any(
+                |event| matches!(event, Event::Failure(reason) if reason.contains("endpoint"))
+            )
+        );
     }
 }

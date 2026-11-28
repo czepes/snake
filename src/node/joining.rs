@@ -43,7 +43,7 @@ impl Joining {
         player: String,
         status: PlayerStatus,
         cfg: Option<Config>,
-    ) -> Joining {
+    ) -> Option<Joining> {
         let mut rel = Reliable::new();
         let join = mk(
             0,
@@ -57,8 +57,8 @@ impl Joining {
                 status,
             },
         );
-        let sent = rel.send_request(cx.ob, cx.now, key.addr, Kind::Control, join);
-        Joining {
+        let sent = rel.send_request(cx.ob, cx.now, key.addr, Kind::Control, join)?;
+        Some(Joining {
             key,
             started: cx.now,
             join_seq: sent.seq,
@@ -70,7 +70,7 @@ impl Joining {
             buffered: None,
             last_discover: cx.now,
             rel,
-        }
+        })
     }
 
     pub(super) fn view(&self) -> JoiningView<'_> {
@@ -247,8 +247,9 @@ impl Joining {
         if self.cfg.is_none()
             && self.acked
             && cx.now.duration_since(self.last_discover) >= JOIN_DISCOVER_PERIOD
+            && let Some(seq) = cx.ob.seq()
         {
-            let m = mk(cx.ob.seq(), None, None, None, Body::Discover);
+            let m = mk(seq, None, None, None, Body::Discover);
             cx.ob.unicast(self.key.addr, &m);
             self.last_discover = cx.now;
         }

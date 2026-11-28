@@ -38,12 +38,18 @@ pub enum Out {
     Multicast(Vec<u8>),
 }
 
+/// Неустранимая ошибка отправки в текущей сессии.
+#[derive(Debug)]
+pub enum Fault {
+    SequenceExhausted,
+    Encoding(String),
+}
+
 /// Исходящие датаграммы, счётчик `msg_seq` и журнал трассировки.
 pub struct Outbox {
     pub out: Vec<Out>,
-    next_seq: i64,
-    /// Ошибка реализации (например, слишком большое сообщение): игра должна завершиться.
-    pub fault: Option<String>,
+    next_seq: Option<i64>,
+    pub fault: Option<Fault>,
     pub trace_on: bool,
     pub trace: Vec<String>,
 }
@@ -52,7 +58,7 @@ impl Outbox {
     pub fn new(first_seq: i64) -> Self {
         Outbox {
             out: Vec::new(),
-            next_seq: first_seq,
+            next_seq: (first_seq >= 0).then_some(first_seq),
             fault: None,
             trace_on: false,
             trace: Vec::new(),
@@ -60,10 +66,20 @@ impl Outbox {
     }
 
     /// Следующий `msg_seq`. Счётчик общий для всех адресатов и типов сообщений.
-    pub fn seq(&mut self) -> i64 {
-        let s = self.next_seq;
-        self.next_seq += 1;
-        s
+    pub fn seq(&mut self) -> Option<i64> {
+        let Some(seq) = self.next_seq else {
+            self.fault = Some(Fault::SequenceExhausted);
+            return None;
+        };
+        self.next_seq = seq.checked_add(1);
+        if self.next_seq.is_none() {
+            self.fault = Some(Fault::SequenceExhausted);
+        }
+        Some(seq)
+    }
+
+    pub fn exhausted(&self) -> bool {
+        self.next_seq.is_none()
     }
 
     pub fn unicast(&mut self, to: SocketAddrV4, m: &Message) {
@@ -75,10 +91,12 @@ impl Outbox {
                 self.out.push(Out::Unicast(to, bytes));
             }
             Err(e) => {
-                self.fault = Some(format!(
-                    "сообщение {} не удалось закодировать: {e:?}",
-                    m.body.name()
-                ))
+                self.fault.get_or_insert_with(|| {
+                    Fault::Encoding(format!(
+                        "сообщение {} не удалось закодировать: {e:?}",
+                        m.body.name()
+                    ))
+                });
             }
         }
     }
@@ -92,10 +110,12 @@ impl Outbox {
                 self.out.push(Out::Multicast(bytes));
             }
             Err(e) => {
-                self.fault = Some(format!(
-                    "сообщение {} не удалось закодировать: {e:?}",
-                    m.body.name()
-                ))
+                self.fault.get_or_insert_with(|| {
+                    Fault::Encoding(format!(
+                        "сообщение {} не удалось закодировать: {e:?}",
+                        m.body.name()
+                    ))
+                });
             }
         }
     }
@@ -285,7 +305,8 @@ impl Reliable {
     }
 
     /// Ставит сообщение в очередь на подтверждение и отправляет его сразу.
-    /// Возвращает отправленное сообщение (с присвоенным `msg_seq`).
+    /// Возвращает отправленное сообщение с присвоенным `msg_seq`, либо `None`
+    /// при исчерпании счётчика.
     ///
     /// Steer/State вытесняют прежние сообщения своего типа, Ping не дублируется.
     /// Управляющие запросы не вытесняются: они представляют отдельные операции,
@@ -297,13 +318,13 @@ impl Reliable {
         to: SocketAddrV4,
         kind: Kind,
         mut msg: Message,
-    ) -> Message {
+    ) -> Option<Message> {
         let link = self.links.entry(to).or_insert_with(|| Link::new(now));
         match kind {
             Kind::Steer | Kind::State => link.pending.retain(|p| p.kind != kind),
             Kind::Ping => {
                 if let Some(p) = link.pending.iter().find(|p| p.kind == Kind::Ping) {
-                    return p.msg.clone();
+                    return Some(p.msg.clone());
                 }
             }
             Kind::Control => {}
@@ -316,7 +337,7 @@ impl Reliable {
                 None => break,
             }
         }
-        msg.seq = ob.seq();
+        msg.seq = ob.seq()?;
         ob.unicast(to, &msg);
         link.last_tx = now;
         link.max_req_sent = msg.seq;
@@ -325,7 +346,7 @@ impl Reliable {
             kind,
             last_sent: now,
         });
-        msg
+        Some(msg)
     }
 
     /// Отправляет ACK на запрос и возвращает его (его сохраняют в окне для повторов).
@@ -397,7 +418,8 @@ impl Reliable {
         for (&addr, link) in self.links.iter_mut() {
             let max_sent = link.max_req_sent;
             // Запрос, после которого ушло ≥ окна новых, больше не повторяем.
-            link.pending.retain(|p| max_sent < p.msg.seq + SEQ_WINDOW);
+            link.pending
+                .retain(|p| p.msg.seq > max_sent.saturating_sub(SEQ_WINDOW));
 
             let mut sent = false;
             for p in link.pending.iter_mut() {
@@ -412,9 +434,13 @@ impl Reliable {
             }
 
             let has_ping = link.pending.iter().any(|p| p.kind == Kind::Ping);
-            if link.ping && !has_ping && now.duration_since(link.last_tx) >= PING_AFTER {
+            if link.ping
+                && !has_ping
+                && now.duration_since(link.last_tx) >= PING_AFTER
+                && let Some(seq) = ob.seq()
+            {
                 let msg = Message {
-                    seq: ob.seq(),
+                    seq,
                     sender_id: my_id,
                     receiver_id: link.peer_id,
                     game_name: Some(game.to_owned()),
@@ -497,7 +523,9 @@ mod tests {
         let mut ob = Outbox::new(10);
         let mut rel = Reliable::new();
         let t0 = Instant::now();
-        let sent = rel.send_request(&mut ob, t0, addr(1), Kind::Control, ping_msg());
+        let sent = rel
+            .send_request(&mut ob, t0, addr(1), Kind::Control, ping_msg())
+            .unwrap();
         assert_eq!(sent.seq, 10);
         assert_eq!(ob.out.len(), 1);
 
@@ -541,6 +569,58 @@ mod tests {
         assert_eq!(ob.out.len(), 1, "должен уйти Ping");
         let dead = rel.tick(&mut ob, t0 + Duration::from_millis(1100), "g", Some(1));
         assert_eq!(dead, vec![addr(1)]);
+    }
+
+    #[test]
+    fn last_sequence_number_is_never_reused() {
+        let mut ob = Outbox::new(i64::MAX);
+        assert_eq!(ob.seq(), Some(i64::MAX));
+        assert!(matches!(ob.fault, Some(Fault::SequenceExhausted)));
+        assert_eq!(ob.seq(), None);
+        assert_eq!(ob.seq(), None);
+    }
+
+    #[test]
+    fn retry_window_expires_at_1024_near_the_sequence_limit() {
+        let mut ob = Outbox::new(i64::MAX - SEQ_WINDOW - 1);
+        let mut rel = Reliable::new();
+        let t0 = Instant::now();
+        let first = rel
+            .send_request(&mut ob, t0, addr(1), Kind::Control, ping_msg())
+            .unwrap();
+        ob.next_seq = Some(i64::MAX - 1);
+        let last = rel
+            .send_request(&mut ob, t0, addr(1), Kind::Control, ping_msg())
+            .unwrap();
+        assert_eq!(last.seq - first.seq, SEQ_WINDOW);
+        ob.out.clear();
+
+        rel.tick(&mut ob, t0 + RESEND_AFTER, "g", Some(1));
+        assert_eq!(rel.links[&addr(1)].pending.len(), 1);
+        let Out::Unicast(_, bytes) = &ob.out[0] else {
+            panic!("ожидался повтор unicast");
+        };
+        assert_eq!(wire::decode(bytes).unwrap().seq, last.seq);
+    }
+
+    #[test]
+    fn retries_work_near_the_end_of_the_sequence_range() {
+        let mut ob = Outbox::new(i64::MAX - 10);
+        let mut rel = Reliable::new();
+        let t0 = Instant::now();
+        let sent = rel
+            .send_request(&mut ob, t0, addr(1), Kind::Control, ping_msg())
+            .unwrap();
+        assert_eq!(sent.seq, i64::MAX - 10);
+        ob.out.clear();
+
+        rel.tick(&mut ob, t0 + RESEND_AFTER, "g", Some(1));
+        let Out::Unicast(to, bytes) = &ob.out[0] else {
+            panic!("ожидался повтор unicast");
+        };
+        assert_eq!(*to, addr(1));
+        assert_eq!(wire::decode(bytes).unwrap().seq, sent.seq);
+        assert!(rel.on_ack(t0 + RESEND_AFTER, addr(1), sent.seq).is_some());
     }
 
     #[test]
