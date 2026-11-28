@@ -658,6 +658,31 @@ fn deputy_takes_over_when_master_dies() {
 }
 
 #[test]
+fn newly_joined_normal_fails_over_without_any_further_master_packets() {
+    let mut sim = Sim::new(3, 93);
+    sim.host(0, "g", "A");
+    sim.join(1, 0, "g", "B", PlayerStatus::Viewing);
+    sim.run(600);
+    assert_eq!(sim.view(1).role, NodeRole::Deputy);
+
+    sim.join(2, 0, "g", "C", PlayerStatus::Viewing);
+    for _ in 0..100 {
+        if sim.in_game(2) {
+            break;
+        }
+        sim.step(5);
+    }
+    assert_eq!(sim.view(2).role, NodeRole::Normal);
+    sim.kill(0);
+    sim.queue.retain(|packet| packet.from != addr_of(0));
+    sim.run(1500);
+
+    assert_eq!(sim.view(1).role, NodeRole::Master);
+    assert_eq!(sim.view(2).master, Some(addr_of(1)));
+    assert_eq!(sim.view(2).players.len(), 2);
+}
+
+#[test]
 fn commands_still_work_after_failover() {
     let mut sim = Sim::new(3, 12);
     sim.host(0, "g", "A");
@@ -903,6 +928,142 @@ fn server_style_creation_by_join_learns_config_via_discover() {
 }
 
 #[test]
+fn joining_ignores_other_games_even_if_their_config_is_valid() {
+    let now = Instant::now();
+    let mut client = Node::new(now, 10, 1);
+    client.set_server(Some(addr_of(0)));
+    client.command(
+        now,
+        Command::HostOnServer {
+            game: "target".into(),
+            player: "client".into(),
+        },
+    );
+    let join = client
+        .drain_out()
+        .into_iter()
+        .find_map(|out| match out {
+            Out::Unicast(_, bytes) => Some(decode(&bytes).unwrap()),
+            _ => None,
+        })
+        .unwrap();
+    let announcement = |game: &str, cfg| Message {
+        seq: 10,
+        sender_id: None,
+        receiver_id: None,
+        game_name: None,
+        body: Body::Announcement(vec![Announcement {
+            game_name: game.into(),
+            config: cfg,
+            players: vec![],
+            can_join: true,
+        }]),
+    };
+    client.on_datagram(
+        now,
+        addr_of(0),
+        false,
+        &encode(&announcement("other", Config::default())).unwrap(),
+    );
+    assert!(!client.joining_view().unwrap().has_config);
+    let invalid = Config {
+        width: 9,
+        ..Config::default()
+    };
+    client.on_datagram(
+        now,
+        addr_of(0),
+        false,
+        &encode(&announcement("target", invalid)).unwrap(),
+    );
+    assert!(!client.joining_view().unwrap().has_config);
+    let wrong_game = Message {
+        seq: join.seq,
+        sender_id: Some(1),
+        receiver_id: Some(2),
+        game_name: Some("other".into()),
+        body: Body::Ack,
+    };
+    client.on_datagram(now, addr_of(0), false, &encode(&wrong_game).unwrap());
+    assert!(!client.joining_view().unwrap().acked);
+}
+
+#[test]
+fn joining_retries_and_discovers_at_the_required_intervals() {
+    let now = Instant::now();
+    let mut client = Node::new(now, 10, 1);
+    client.set_server(Some(addr_of(0)));
+    client.command(
+        now,
+        Command::HostOnServer {
+            game: "target".into(),
+            player: "client".into(),
+        },
+    );
+    let join_bytes = client
+        .drain_out()
+        .into_iter()
+        .find_map(|out| match out {
+            Out::Unicast(_, bytes) => Some(bytes),
+            _ => None,
+        })
+        .unwrap();
+    let join = decode(&join_bytes).unwrap();
+    client.on_tick(now + Duration::from_millis(99));
+    assert!(client.drain_out().is_empty());
+    client.on_tick(now + Duration::from_millis(100));
+    assert!(client.drain_out().iter().any(|out| match out {
+        Out::Unicast(_, bytes) => *bytes == join_bytes,
+        _ => false,
+    }));
+    let ack = Message {
+        seq: join.seq,
+        sender_id: Some(1),
+        receiver_id: Some(2),
+        game_name: Some("target".into()),
+        body: Body::Ack,
+    };
+    client.on_datagram(
+        now + Duration::from_millis(100),
+        addr_of(0),
+        false,
+        &encode(&ack).unwrap(),
+    );
+    client.on_tick(now + Duration::from_millis(499));
+    assert!(!client.drain_out().iter().any(|out| matches!(out, Out::Unicast(_, bytes) if matches!(decode(bytes).unwrap().body, Body::Discover))));
+    client.on_tick(now + Duration::from_millis(500));
+    assert!(client.drain_out().iter().any(|out| matches!(out, Out::Unicast(_, bytes) if matches!(decode(bytes).unwrap().body, Body::Discover))));
+    let announcement = Message {
+        seq: 99,
+        sender_id: None,
+        receiver_id: None,
+        game_name: None,
+        body: Body::Announcement(vec![Announcement {
+            game_name: "target".into(),
+            config: Config::default(),
+            players: vec![],
+            can_join: true,
+        }]),
+    };
+    client.on_datagram(
+        now + Duration::from_millis(500),
+        addr_of(0),
+        false,
+        &encode(&announcement).unwrap(),
+    );
+    client.on_tick(now + Duration::from_millis(1000));
+    assert!(!client.drain_out().iter().any(|out| matches!(out, Out::Unicast(_, bytes) if matches!(decode(bytes).unwrap().body, Body::Discover))));
+    client.on_tick(now + Duration::from_millis(5000));
+    assert_eq!(client.phase(), PhaseKind::Lobby);
+    assert!(
+        client
+            .drain_events()
+            .iter()
+            .any(|e| matches!(e, Event::Failure(s) if s.contains("состояние")))
+    );
+}
+
+#[test]
 fn joining_accepts_ack_state_and_config_in_any_order() {
     for order in [
         [0, 1, 2],
@@ -966,9 +1127,16 @@ fn joining_accepts_ack_state_and_config_in_any_order() {
         };
         state.order += 10;
         let expected_order = state.order;
+        let mut same_order = newer.clone();
+        same_order.seq += 1;
+        let Body::State(ref mut state) = same_order.body else {
+            unreachable!();
+        };
+        state.players[0].score = 123;
         for (i, index) in order.into_iter().enumerate() {
             if index == 1 {
                 client.on_datagram(now, addr_of(0), false, &encode(&newer).unwrap());
+                client.on_datagram(now, addr_of(0), false, &encode(&same_order).unwrap());
             }
             client.on_datagram(
                 now,
@@ -998,6 +1166,21 @@ fn joining_accepts_ack_state_and_config_in_any_order() {
         assert_eq!(view.players.len(), 2);
         assert_eq!(view.status, PlayerStatus::Playing);
         assert_eq!(view.order, expected_order);
+        assert_ne!(view.players[0].score, 123);
+        client.drain_out();
+        client.on_tick(now + Duration::from_millis(100));
+        assert!(
+            client.drain_out().iter().any(|out| match out {
+                Out::Unicast(to, bytes) if *to == addr_of(0) => {
+                    let msg = decode(bytes).unwrap();
+                    matches!(msg.body, Body::Ping)
+                        && msg.sender_id == Some(2)
+                        && msg.receiver_id == Some(1)
+                }
+                _ => false,
+            }),
+            "после подключения Ping должен адресоваться ведущему: {order:?}"
+        );
     }
 }
 

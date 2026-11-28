@@ -254,7 +254,7 @@ impl Joining {
             cx.ob.unicast(self.key.addr, &m);
             self.last_discover = cx.now;
         }
-        if cx.now.duration_since(self.started) > JOIN_DEADLINE {
+        if cx.now.duration_since(self.started) >= JOIN_DEADLINE {
             return JoinStep::Failed(self.failure_reason());
         }
         JoinStep::Wait
