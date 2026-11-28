@@ -6,6 +6,41 @@ use snakes::wire::{
 };
 
 #[test]
+fn udp_transport_preserves_source_endpoint_and_discards_oversized_packets() {
+    use std::net::UdpSocket;
+    use std::time::{Duration, Instant};
+
+    use snakes::net::Net;
+    use snakes::reliable::Out;
+
+    let now = Instant::now();
+    let mut net = Net::open(None, false, now).unwrap();
+    let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    let std::net::SocketAddr::V4(peer_addr) = peer.local_addr().unwrap() else {
+        unreachable!();
+    };
+    net.send(&Out::Unicast(peer_addr, vec![1, 2, 3]));
+    let mut buf = [0; 16];
+    let (len, from) = peer.recv_from(&mut buf).unwrap();
+    assert_eq!(&buf[..len], &[1, 2, 3]);
+    assert_eq!(from.port(), net.local_port());
+
+    peer.send_to(&vec![0; MAX_DATAGRAM + 1], from).unwrap();
+    peer.send_to(&[4, 5, 6], from).unwrap();
+    let mut received = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while received.is_empty() && Instant::now() < deadline {
+        net.recv(|packet| received.push(packet));
+        std::thread::yield_now();
+    }
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].from, peer_addr);
+    assert!(!received[0].multicast);
+    assert_eq!(received[0].bytes, [4, 5, 6]);
+}
+
+#[test]
 fn maximum_legal_state_fits_in_one_datagram_and_roundtrips() {
     let first_id = i32::MAX - 6;
     let players = (0..6)
